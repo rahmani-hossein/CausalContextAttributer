@@ -6,6 +6,7 @@ import matplotlib.pyplot as plt
 from dotenv import load_dotenv
 from sklearn.linear_model import LassoCV
 import Solver
+from typing import List, Dict
 
 # Pre-compiled regex patterns
 word_pattern = re.compile(r'\b\w+\b')
@@ -137,7 +138,7 @@ class LLM_Handler():
         return filled_prompt
 
     def get_completion(self,
-                       messages: list[dict[str, str]],
+                       messages: List[Dict[str, str]],
                        model: str = "gpt-4",
                        max_tokens=500,
                        temperature=0,
@@ -168,8 +169,8 @@ class LLM_Handler():
 original_prompt = "Local Mayor Launches Initiative to Enhance Urban Public Transport."
 
 # Load the full design matrix and response vector.
-X_full = np.load("X_M_max.npy")
-y_full = np.load("y_M_max.npy")
+X_full = np.load("data/X_M_max.npy")
+y_full = np.load("data/y_M_max.npy")
 print(f"Loaded X with shape {X_full.shape} and y with shape {y_full.shape}.")
 
 # Define sample sizes to test.
@@ -194,12 +195,13 @@ coeff_trajectories = {word: [] for word in unique_words}
 for M in sample_sizes:
     # Subset the arrays: first M rows.
     X_subset = X_full[:M, :]
-    y_subset = y_full[:M]
+    y_subset = 100 * y_full[:M]
     
     # Lasso solver: fit and extract coefficients.
     lasso_solver = Solver.LassoSolver(coef_scaling=coef_scaling)
     lasso_coef = lasso_solver.fit(X_subset, y_subset)
     
+    print(f'lasso coeffitient for M={M}', lasso_coef)
     # For each word (using its index), store the estimated coefficient.
     for word, idx in word_to_index.items():
         coeff_trajectories[word].append(lasso_coef[idx])

@@ -3,7 +3,7 @@ from numpy.typing import NDArray
 from sklearn.linear_model import lasso_path
 from typing import Tuple
 from abc import ABC, abstractmethod
-from sklearn.linear_model import LassoCV
+from sklearn.linear_model import LassoCV, Lasso
 from sklearn.linear_model import LogisticRegression, LinearRegression
 from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor, RandomForestClassifier
 from lightgbm import LGBMRegressor
@@ -23,6 +23,108 @@ class BASE_AME_Solver(ABC):
 
 
 class LassoSolver(BASE_AME_Solver):
+    """
+    A LASSO solver using the scikit-learn library for estimating AME.
+
+    Attributes:
+        lasso_alpha (float):
+            The alpha parameter for the LASSO regression. Defaults to 0.01.
+
+    Methods:
+        fit(self, masks: NDArray, outputs: NDArray, num_output_tokens: int) -> Tuple[NDArray, NDArray]:
+            Fit the solver to the given data.
+    """
+
+    def __init__(self, coef_scaling) -> None:
+        super().__init__()
+        self.coef_scaling = coef_scaling
+
+    def fit(self, X, y):
+        """ 
+        Do not use CrossValidation LAsso. It's bad. just use the lasso path like ElasticNet in R from the GLMNET package.
+        """
+        best_lambda, best_coef, best_intercept, alphas, coefs_unscaled, mses = lasso_path_in_sample_best(X, y)
+
+        print("Optimal lambda:", best_lambda)
+        return best_coef * np.sqrt(self.coef_scaling)
+
+
+class SparseLassoSolver(BASE_AME_Solver):
+    """
+    A LASSO solver using the scikit-learn library for estimating AME.
+
+    Attributes:
+        lasso_alpha (float):
+            The alpha parameter for the LASSO regression. Defaults to 0.01.
+
+    Methods:
+        fit(self, masks: NDArray, outputs: NDArray, num_output_tokens: int) -> Tuple[NDArray, NDArray]:
+            Fit the solver to the given data.
+    """
+
+    def __init__(self, coef_scaling) -> None:
+        super().__init__()
+        self.coef_scaling = coef_scaling
+
+    def fit(self, X, y):
+        """ 
+        Lambda 1se result
+        """
+        lasso_cv = LassoCV(cv=10, random_state=42).fit(X, y)
+
+        # Compute lambda1se using our helper function
+        lambda_1se = compute_lambda_1se(lasso_cv)
+        print("Lambda that minimizes CV error (lambda_min):", lasso_cv.alpha_)
+        print("Lambda 1se (sparser model within one SE of the best):", lambda_1se)
+
+        # Optionally, refit a Lasso model with the lambda1se value:
+        lasso_1se = Lasso(alpha=lambda_1se, random_state=42)
+        lasso_1se.fit(X, y)
+
+        return lasso_1se.coef_ * np.sqrt(self.coef_scaling)
+    
+
+
+def compute_lambda_1se(lasso_cv):
+    """
+    Compute lambda1se (largest alpha within one std error of the minimal CV error)
+    from a fitted LassoCV model.
+    
+    Parameters:
+        lasso_cv: A fitted instance of LassoCV.
+        
+    Returns:
+        lambda_1se: The lambda value (alpha) that is within one standard error of the best.
+    """
+    alphas = lasso_cv.alphas_
+    mse_path = lasso_cv.mse_path_  # shape: (n_alphas, n_folds)
+
+    
+    # Compute the mean and std of the MSE for each alpha
+    mean_mse = mse_path.mean(axis=1)
+    std_mse = mse_path.std(axis=1)
+    
+    # Find the minimum mean MSE and its index
+    min_idx = mean_mse.argmin()
+    min_mean = mean_mse[min_idx]
+    min_std = std_mse[min_idx]
+    
+    # One-standard-error threshold
+    threshold = min_mean + min_std
+    
+    # Find all alphas whose mean MSE is less than or equal to the threshold
+    valid = mean_mse <= threshold
+    
+    # Choose the largest alpha among those (largest alpha gives the sparsest model)
+    lambda_1se = alphas[valid].max()
+    return lambda_1se
+
+
+
+
+
+
+class LassoGLMNETSolver(BASE_AME_Solver):
     """
     A LASSO solver using the scikit-learn library for estimating AME.
 
@@ -283,29 +385,3 @@ def lasso_path_in_sample_best(
     best_intercept_ = y_mean - np.sum(best_coef_ * X_mean)
     
     return best_alpha, best_coef_, best_intercept_, alphas, coefs_unscaled, mses
-
-
-
-if __name__ == "__main__":
-    # Create a synthetic dataset
-    np.random.seed(42)
-    n, p = 100, 5
-    X = np.random.randn(n, p)
-    # True coefficients
-    true_coef = np.array([2.0, 0, -1.5, 0, 1.0])
-    y = X @ true_coef + 0.02 * np.random.randn(n)
-
-    # Fit Lasso path (no CV), pick best alpha by in-sample MSE
-    best_alpha, best_coef, best_intercept, alphas, coefs_unscaled, mses = \
-        lasso_path_in_sample_best(X, y)
-
-    print("All alpha values (descending):", alphas)
-    print("All in-sample MSEs:", mses)
-    print("Best alpha:", best_alpha)
-    print("Best in-sample MSE:", mses[np.argmin(mses)])
-    print("Best coefficients:", best_coef)
-    print("Best intercept:", best_intercept)
-
-    # Example: predict with the best solution
-    y_pred = X.dot(best_coef) + best_intercept
-    print("First 5 predictions:", y_pred[:5])
