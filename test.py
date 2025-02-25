@@ -195,10 +195,10 @@ coeff_trajectories = {word: [] for word in unique_words}
 for M in sample_sizes:
     # Subset the arrays: first M rows.
     X_subset = X_full[:M, :]
-    y_subset = 100 * y_full[:M]
+    y_subset = y_full[:M]
     
     # Lasso solver: fit and extract coefficients.
-    lasso_solver = Solver.LassoSolver(coef_scaling=coef_scaling)
+    lasso_solver = Solver.SparseLassoSolver(coef_scaling=coef_scaling, num_folds=5)
     lasso_coef = lasso_solver.fit(X_subset, y_subset)
     
     print(f'lasso coeffitient for M={M}', lasso_coef)
@@ -212,7 +212,7 @@ for word, coeffs in coeff_trajectories.items():
     plt.plot(sample_sizes, coeffs, marker='o', label=word)
 plt.xlabel("Sample Size (M)")
 plt.ylabel("Estimated Coefficient")
-plt.title("Word Coefficient Trajectories vs Sample Size (Lasso)")
+plt.title("Word Coefficient Trajectories vs Sample Size (SparseLasso CV)")
 plt.legend()
 plt.show()
 
