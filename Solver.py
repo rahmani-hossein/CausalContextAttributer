@@ -209,7 +209,6 @@ class SparseLassoSolver(BASE_AME_Solver):
         return lasso_1se.coef_ * np.sqrt(self.coef_scaling)
     
 
-
 class CATENet(nn.Module):
     def __init__(self, input_dim):
         super(CATENet, self).__init__()
@@ -321,7 +320,7 @@ class PytorchRLearner:
         # Get CATE estimates for all samples
         self.cate_model.eval()
         with torch.no_grad():
-            X_all_torch = self._to_torch(X)
+            X_all_torch = self._to_torch(X_train_nuisance)
             cate_estimates = self.cate_model(X_all_torch).numpy().flatten()
         
         return {
