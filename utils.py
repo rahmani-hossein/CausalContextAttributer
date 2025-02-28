@@ -11,7 +11,7 @@ from sklearn.model_selection import KFold
 from sklearn.metrics import mean_squared_error
 from sklearn.model_selection import train_test_split
 
-def compute_lambda_1se(lasso_cv):
+def compute_lambda_1se(lasso_cv, cv = 10):
         """
         Compute lambda1se (largest alpha within one std error of the minimal CV error)
         from a fitted LassoCV model.
@@ -33,7 +33,7 @@ def compute_lambda_1se(lasso_cv):
         # Find the minimum mean MSE and its index
         min_idx = mean_mse.argmin()
         min_mean = mean_mse[min_idx]
-        min_std = std_mse[min_idx]
+        min_std = std_mse[min_idx] / np.sqrt(cv)
         
         # One-standard-error threshold
         threshold = min_mean + min_std

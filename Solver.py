@@ -170,91 +170,7 @@ def lasso_path_in_sample_best(
     
     return best_alpha, best_coef_, best_intercept_, alphas, coefs_unscaled, mses
 
-
-class SparseLassoSolverImplementation2(BASE_AME_Solver):
-    """
-    A LASSO solver using the scikit-learn library for estimating AME.
-
-    Attributes:
-        lasso_alpha (float):
-            The alpha parameter for the LASSO regression. Defaults to 0.01.
-
-    Methods:
-        fit(self, masks: NDArray, outputs: NDArray, num_output_tokens: int) -> Tuple[NDArray, NDArray]:
-            Fit the solver to the given data.
-    """
-
-    def __init__(self, coef_scaling) -> None:
-        super().__init__()
-        self.coef_scaling = coef_scaling
-
-    def fit(self, X, y):
-        """ 
-        Lambda 1se result
-        """
-        lambda_1se = compute_lambda1se_path(X,y)
-        # Optionally, refit a Lasso model with the lambda1se value:
-        lasso_1se = Lasso(alpha=lambda_1se, random_state=42)
-        lasso_1se.fit(X, y)
-
-        return lasso_1se.coef_ * np.sqrt(self.coef_scaling)
     
-
-def compute_lambda1se_path(X,y):
-    # First, compute a fixed alpha grid using lasso_path on the full data.
-# lasso_path returns alphas sorted in decreasing order.
-    alphas_path, coefs_path, _ = lasso_path(X, y)
-    alpha_grid = alphas_path  # We'll use this grid for all folds
-
-    n_alphas = len(alpha_grid)
-    n_folds = 5
-    mse_cv = np.zeros((n_alphas, n_folds))  # to store MSE for each alpha and each fold
-
-    # Set up 5-fold cross-validation
-    kf = KFold(n_splits=n_folds, shuffle=True, random_state=42)
-
-    fold_idx = 0
-    for train_idx, val_idx in kf.split(X):
-        X_train, X_val = X[train_idx], X[val_idx]
-        y_train, y_val = y[train_idx], y[val_idx]
-        
-        # Compute lasso_path on training data using the fixed alpha grid.
-        # We pass the fixed grid with 'alphas=alpha_grid'.
-        alphas_fold, coefs_fold, _ = lasso_path(X_train, y_train, alphas=alpha_grid)
-        
-        # For each candidate alpha, compute predictions on the validation set
-        # and calculate the mean squared error.
-        for i, alpha in enumerate(alpha_grid):
-            coef = coefs_fold[:, i]
-            # Note: lasso_path does not compute an intercept. 
-            # Here we assume data is centered or that the intercept is negligible.
-            y_pred = np.dot(X_val, coef)
-            mse_cv[i, fold_idx] = mean_squared_error(y_val, y_pred)
-            
-        fold_idx += 1
-
-    # Compute the mean and standard deviation of MSE for each alpha over folds.
-    mean_mse = mse_cv.mean(axis=1)
-    std_mse = mse_cv.std(axis=1)
-
-    # Identify the best (minimum mean MSE) and its corresponding standard deviation.
-    best_idx = np.argmin(mean_mse)
-    best_mse = mean_mse[best_idx]
-    best_std = std_mse[best_idx]
-
-    # Define the one-standard-error threshold.
-    # For an error metric (lower is better), threshold = best_mse + best_std.
-    threshold = best_mse + best_std
-
-    # Select all candidate alphas whose mean MSE is within the threshold.
-    # Among those, we choose the largest alpha (i.e. most regularized/sparser model).
-    valid_indices = np.where(mean_mse <= threshold)[0]
-    lambda_1se = alpha_grid[valid_indices].max()
-
-    print("Lambda that minimizes CV error (λ_min):", alpha_grid[best_idx])
-    print("Lambda 1se (most regularized within 1 SE of the best):", lambda_1se)
-    return lambda_1se
-
 
 
 class SparseLassoSolver(BASE_AME_Solver):
@@ -270,18 +186,19 @@ class SparseLassoSolver(BASE_AME_Solver):
             Fit the solver to the given data.
     """
 
-    def __init__(self, coef_scaling) -> None:
+    def __init__(self, coef_scaling, num_folds = 10) -> None:
         super().__init__()
         self.coef_scaling = coef_scaling
+        self.num_folds = num_folds
 
     def fit(self, X, y):
         """ 
         Lambda 1se result
         """
-        lasso_cv = LassoCV(cv=10, random_state=42).fit(X, y)
+        lasso_cv = LassoCV(cv=self.num_folds, random_state=42).fit(X, y)
 
         # Compute lambda1se using our helper function
-        lambda_1se = utils.compute_lambda_1se(lasso_cv)
+        lambda_1se = utils.compute_lambda_1se(lasso_cv, cv = self.num_folds)
         print("Lambda that minimizes CV error (lambda_min):", lasso_cv.alpha_)
         print("Lambda 1se (sparser model within one SE of the best):", lambda_1se)
 
@@ -290,83 +207,6 @@ class SparseLassoSolver(BASE_AME_Solver):
         lasso_1se.fit(X, y)
 
         return lasso_1se.coef_ * np.sqrt(self.coef_scaling)
-    
-
-
-
-class LassoGLMNETSolver(BASE_AME_Solver):
-    """
-    A LASSO solver using the scikit-learn library for estimating AME.
-
-    Attributes:
-        lasso_alpha (float):
-            The alpha parameter for the LASSO regression. Defaults to 0.01.
-
-    Methods:
-        fit(self, masks: NDArray, outputs: NDArray, num_output_tokens: int) -> Tuple[NDArray, NDArray]:
-            Fit the solver to the given data.
-    """
-
-    def __init__(self, coef_scaling) -> None:
-        super().__init__()
-        self.coef_scaling = coef_scaling
-
-    def fit(self, X, y):
-        """ 
-        Do not use CrossValidation LAsso. It's bad. just use the lasso path like ElasticNet in R from the GLMNET package.
-        """
-        best_lambda, best_coef, best_intercept, alphas, coefs_unscaled, mses = lasso_path_in_sample_best(X, y)
-
-        print("Optimal lambda:", best_lambda)
-        return best_coef * np.sqrt(self.coef_scaling)
-
-
-    
-class OrthogonalSolver(BASE_AME_Solver):
-    def __init__(self, source_idx):
-        super().__init__()
-        self.propensity_model = GradientBoostingRegressor(max_depth=3, random_state=123)
-        self.outcome_model = GradientBoostingRegressor(max_depth=3, random_state=123)
-        self.final_model = GradientBoostingRegressor(max_depth=3, random_state=123)
-        self.source_idx = source_idx
-
-    
-    def fit(self, X, y):
-        """
-        Estimate CATE for a single source
-        
-        Parameters:
-        X (np.array): M x n binary matrix where M is number of samples, n is number of sources
-        y (np.array): Target variable for each sample
-        source_idx (int): Index of the source to estimate CATE for
-        
-        Returns:
-        float: CATE estimate for the specified source
-        """
-        T = X[:, self.source_idx]
-        X_reduced = np.delete(X, self.source_idx, axis=1)
-        X_reduced = np.where(X_reduced> 0 , 1, 0)
-        # Step 1: Estimate propensity score e(X) = P(T=1|X)
-        self.propensity_model.fit(X_reduced, T)
-        e_x = self.propensity_model.predict(X_reduced)
-        
-        # Step 2: Estimate outcome model m(X)
-        self.outcome_model.fit(X_reduced, y)
-        m_x = self.outcome_model.predict(X_reduced)
-        
-        # Step 3: Calculate pseudo-outcome
-        pseudo_outcome = (y - m_x) / (T - e_x)
-        
-
-
-        # Step 4: Final regression for CATE
-        w = (T - e_x) ** 2 
- 
-        # use a weighted regression ML model to predict the target with the weights.
-        self.final_model.fit(X_reduced, pseudo_outcome, sample_weight=w)
-        
-        # Return average CATE
-        return np.mean(self.final_model.predict(X_reduced))
     
 
 
