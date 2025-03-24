@@ -6,6 +6,7 @@ from abc import ABC, abstractmethod
 from sklearn.linear_model import LassoCV, Lasso
 from sklearn.linear_model import LogisticRegression, LinearRegression
 from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor, RandomForestClassifier
+from sklearn.ensemble import GradientBoostingClassifier, GradientBoostingRegressor
 from lightgbm import LGBMRegressor
 from sklearn.model_selection import KFold
 from sklearn.metrics import mean_squared_error
@@ -240,7 +241,7 @@ class PytorchRLearner:
         self.random_state = random_state
         
         # Initialize nuisance parameter models
-        self.propensity_model = GradientBoostingRegressor(
+        self.propensity_model = GradientBoostingClassifier(
             max_depth=3, 
             random_state=random_state
         )
@@ -269,6 +270,7 @@ class PytorchRLearner:
         """
         Estimate CATE using R-learning with PyTorch optimization
         """
+        T = T.astype(int)
         
         # Split data for nuisance parameters
         X_train_nuisance, X_other_half, T_train_nuisance, T_other_half, \
@@ -279,7 +281,7 @@ class PytorchRLearner:
         # Step 1: Estimate nuisance parameters
         # Propensity score
         self.propensity_model.fit(X_train_nuisance, T_train_nuisance)
-        e_x = self.propensity_model.predict(X_other_half)
+        e_x = self.propensity_model.predict_proba(X_other_half)[:, 1]
         
         # Outcome model
         self.outcome_model.fit(X_train_nuisance, y_train_nuisance)
