@@ -10,10 +10,11 @@ import os
 
 class LLM_Handler:
   def __init__ (self, class_labels : List, model_name: str = "meta-llama/Llama-3.2-1B"):
-       load_dotenv('config.env')
+       load_dotenv('/home/hrahmani/CausalContextAttributer/config.env')
        hf_auth_token  = os.environ.get("HF_API_KEY")
-       self.tokenizer = AutoTokenizer.from_pretrained(model_name, use_auth_token=hf_auth_token)
-       self.model = AutoModelForCausalLM.from_pretrained(model_name, use_auth_token=hf_auth_token).eval()
+      #  print("authentication token: ",  hf_auth_token)
+       self.tokenizer = AutoTokenizer.from_pretrained(model_name, token=hf_auth_token)
+       self.model = AutoModelForCausalLM.from_pretrained(model_name, token=hf_auth_token).eval()
        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
        self.model.to(self.device)
 
@@ -41,5 +42,49 @@ class LLM_Handler:
             logits = outputs.logits[:, -1, :]
             probs = torch.softmax(logits, dim=-1)
             class_probs = {label: probs[0, token].item() for label, token in self.class_tokens.items()}
-            print(probs.shape)
             return max(class_probs, key=class_probs.get)
+        
+
+        
+class AttributionCalculator:
+    def __init__(self, model_name: str = "meta-llama/Llama-3.2-1B"):  # Use an accessible model
+        """Initialize the model and tokenizer."""
+        class_labels = ["Technology", "Politics", "Sports", "Art", "Other"]
+        self.LLM_Handler = LLM_Handler(class_labels, model_name)
+
+
+
+# Example Usage
+if __name__ == "__main__":
+    # Note: Llama 3-8B may require special access; using Llama 2-7B as a placeholder     meta-llama/Meta-Llama-3-8B
+    calc = AttributionCalculator(model_name="meta-llama/Llama-3.2-1B")  # Adjust as needed
+
+    # Single data point
+    headline = "Election Results Announced Today"
+    true_label = "Politics"
+    import time
+    start_time = time.time()
+    label = calc.LLM_Handler.get_predicted_class(headline)
+    end_time = time.time()
+    time_taken = end_time - start_time
+    print(f"Time taken for llm call: {time_taken} seconds")
+    print(label)
+
+    print(calc.LLM_Handler.getClassification_log_prob("__ Results Announced Today", label))
+
+
+    headline2 = " __ Results Announced Today"
+    true_label = "Politics"
+    label2 = calc.LLM_Handler.get_predicted_class(headline2)
+    print(label2)
+    print(calc.LLM_Handler.getClassification_log_prob(headline2, label2))
+    # Dataset
+    dataset = [
+        ("Election Results Announced Today", "politics"),
+        ("Football Match Ends in Draw", "sports"),
+        ("New Movie Released This Week", "entertainment")
+    ]
+    # metrics = calc.evaluate_dataset(dataset, max_k=3)
+    # print("\nDataset Metrics:")
+    # for metric, value in metrics.items():
+    #     print(f"{metric}: {value}")

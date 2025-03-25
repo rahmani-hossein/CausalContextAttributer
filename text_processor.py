@@ -288,6 +288,8 @@ class EfficientPromptGenerator:
 
 # --- Quick Test / Example ---
 if __name__ == "__main__":
+    import nltk
+    nltk.download('punkt_tab')
 
     # Example usage text
     text = (
