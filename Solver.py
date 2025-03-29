@@ -229,7 +229,7 @@ class CATENet(nn.Module):
 class PytorchRLearner:
     def __init__(self, 
                  learning_rate=0.01, 
-                 n_epochs=1000,
+                 n_epochs=2000,
                  batch_size=32,
                  random_state=123):
         """
@@ -360,20 +360,20 @@ def estimate_all_treatments(X, y):
     
     return results
 
-# Example usage:
-if __name__ == "__main__":
-    # Load data
-    X = np.load("data/X_M_max.npy")
-    y = np.load("data/y_M_max.npy")
+# # Example usage:
+# if __name__ == "__main__":
+#     # Load data
+#     X = np.load("data/X_M_max.npy")
+#     y = np.load("data/y_M_max.npy")
     
-    # Get results for all treatments
-    all_results = estimate_all_treatments(X, y)
+#     # Get results for all treatments
+#     all_results = estimate_all_treatments(X, y)
     
-    # Print summary
-    print("\nResults Summary:")
-    print("-" * 50)
-    for treatment, results in all_results.items():
-        print(f"\n{treatment}:")
-        print(f"ATE: {results['ate']:.3f}")
-        print(f"Final Loss: {results['final_loss']:.4f}")
-        print(f"CATE std: {np.std(results['cate_estimates']):.3f}")
+#     # Print summary
+#     print("\nResults Summary:")
+#     print("-" * 50)
+#     for treatment, results in all_results.items():
+#         print(f"\n{treatment}:")
+#         print(f"ATE: {results['ate']:.3f}")
+#         print(f"Final Loss: {results['final_loss']:.4f}")
+#         print(f"CATE std: {np.std(results['cate_estimates']):.3f}")
