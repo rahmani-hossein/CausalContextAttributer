@@ -113,13 +113,13 @@ class EfficientTextProcessor:
         self._partition_cache[cache_key] = partition
         return partition
 
+
     def create_masked_sample(self, 
-                             text: str, 
-                             partition: TextPartition, 
-                             p: float) -> str:
+                         text: str, 
+                         partition: TextPartition, 
+                         p: float) -> Tuple[str, np.ndarray]:
         """
-        Create a masked sample by replacing some parts (sentences or words) with '__'.
-        The probability of keeping each part is p; probability of masking is (1-p).
+        Create a masked sample by replacing some parts with '__'.
         
         Args:
             text: The original full text.
@@ -127,34 +127,25 @@ class EfficientTextProcessor:
             p: Probability to keep each part.
         
         Returns:
-            A new string with masked parts replaced by '__'.
+            A tuple of (masked_text: str, mask: np.ndarray), where mask[i] is True if part i is kept, False if masked.
         """
-        # Generate a boolean mask: True => keep, False => mask
         mask = np.random.random(len(partition.parts)) < p
-        
         result_parts = []
         last_end = 0
-        
-        # Build the string by walking through the partition
         for (start, end), keep in zip(partition.indices, mask):
-            # Append whatever text occurs between the last partition and this partition
             if start > last_end:
                 result_parts.append(text[last_end:start])
-            
-            # If we keep the part, add the original text;
-            # otherwise, add a placeholder
             if keep:
                 result_parts.append(text[start:end])
             else:
                 result_parts.append("__")
-            
             last_end = end
-        
-        # Append any trailing text after the final partition
         if last_end < len(text):
             result_parts.append(text[last_end:])
-        
-        return "".join(result_parts)
+
+        masked_text = "".join(result_parts)
+        return masked_text, mask
+
 
     def generate_samples(self, 
                         text: str, 
@@ -181,7 +172,7 @@ class EfficientTextProcessor:
         # Create each sample
         samples = []
         for p in probabilities:
-            masked = self.create_masked_sample(text, partition, p)
+            masked, mask = self.create_masked_sample(text, partition, p)
             samples.append(masked)
         
         return samples
@@ -226,18 +217,14 @@ class EfficientPromptGenerator:
 
     def create_X(self, mode = "1/p featurization", split_by: str = "sentence") -> np.ndarray:
         """
-        Build a simple matrix X, where each row corresponds to one masked sample,
-        and each column corresponds to a particular part (sentence or word).
-        
-        Here’s how we set X[m,i]:
-          - If part i is masked in sample m, X[m,i] = -1 / ((1 - p) * sqrt(nu))
-          - If part i is NOT masked in sample m, X[m,i] = +1 / (p * sqrt(nu))
+        Build a matrix X where each row is a masked sample, and each column is a part.
         
         Args:
+            mode: "1/p featurization" or "p featurization".
             split_by: 'sentence' or 'word'.
         
         Returns:
-            A numpy matrix X of shape (num_datasets, number_of_parts).
+            A tuple (X: np.ndarray, partition: TextPartition).
         """
         if split_by == "sentence":
             partition = self.text_processor.split_text(self.original_prompt, "sentence")
@@ -250,50 +237,50 @@ class EfficientPromptGenerator:
         elif mode == "p featurization":
             self.ps = self.sample_pvals_reweighted(self.pval, size = self.num_datasets)
         
-        # Generate the masked samples
-        self.sample_prompts = [
-            self.text_processor.create_masked_sample(self.original_prompt, partition, p)
-            for p in self.ps
-        ]
+        # Generate samples and collect masks
+        self.sample_prompts = []
+        self.masks = []
+        for p in self.ps:
+            masked_text, mask = self.text_processor.create_masked_sample(self.original_prompt, partition, p)
+            # print(f'for p: {p} we created this {masked_text} with this mask: {mask}')
+            self.sample_prompts.append(masked_text)
+            self.masks.append(mask)
         
-        N = len(partition.parts) 
+        N = len(partition.parts)
         X = np.zeros((self.num_datasets, N))
         nu = self.coef_scaling()
-        
-        for m, (p, sample_text) in enumerate(zip(self.ps, self.sample_prompts)):
-
-            for i, (start, end) in enumerate(partition.indices):
-                # Check sample_text in that region
-                snippet = sample_text[start:end]
-                if mode == "1/p featurization":
-                    if snippet == "__":
-                        print("i got the deleted word for sample ", m, "word ", partition.parts[i])
-                        # masked
-                        X[m, i] = -1.0 / ((1 - p) * np.sqrt(nu))
-                    else:
-                        # kept
+        for m, (p, mask) in enumerate(zip(self.ps, self.masks)):
+            for i, keep in enumerate(mask):
+                if keep:
+                    if mode == "1/p featurization":
                         X[m, i] = 1.0 / (p * np.sqrt(nu))
-                elif mode == "p featurization":
-                    if snippet =="__":
-                        X[m,i] = - np.sqrt(p / nu)
+                    elif mode == "p featurization":
+                        X[m, i] = np.sqrt((1 - p) / nu)
+                else:  # masked
+                    if mode == "1/p featurization":
+                        X[m, i] = -1.0 / ((1 - p) * np.sqrt(nu))
+                    elif mode == "p featurization":
+                        X[m, i] = -np.sqrt(p / nu)
+            # print(f'values for {m} th sample: {X[m,:]}')
 
-                    else:
-                        X[m,i] = np.sqrt((1 - p) / nu)
-
-        
         return X, partition
     
     def create_y(self, sampled_prompts, original_label):
 
 
         y = np.zeros(len(sampled_prompts))
-        outputs = []
+        y_logodd = np.zeros(len(sampled_prompts))
+        predicted_label = []
         for i in range(len(sampled_prompts)):
-            logprob = self.LLM_Handler.getClassification_log_prob(sampled_prompts[i], original_label)
-            y[i] = logprob
+            llm_res = self.LLM_Handler.get_classification_metrics(sampled_prompts[i], original_label)
+            y[i] = llm_res['log_prob_given_label']
+            
+            y_logodd[i] = llm_res['log_odds_given_label']
+            print(f"for {i} we had log odds")
+            predicted_label.append(llm_res['predicted_label'])
 
 
-        return y
+        return y, y_logodd, predicted_label
         
 
 

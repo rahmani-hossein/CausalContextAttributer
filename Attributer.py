@@ -24,9 +24,9 @@ class Attributer:
     def attribute(self, original_prompt, split_by = "word", mode = "classification"):
         if mode == "classification":
             original_label =self.LLM_Handler.get_predicted_class(original_prompt)
-            prompt_gen = context_processor.EfficientPromptGenerator(LLM_handler=self.LLM_Handler, prompt=original_prompt, num_datasets=2000)
+            prompt_gen = context_processor.EfficientPromptGenerator(LLM_handler=self.LLM_Handler, prompt=original_prompt, num_datasets=5)
             X, partition = prompt_gen.create_X(split_by="word", mode= "1/p featurization")
-            y = prompt_gen.create_y(prompt_gen.sample_prompts, original_label=original_label)
+            y, y_logodd, outputs = prompt_gen.create_y(prompt_gen.sample_prompts, original_label=original_label)
             np.save('CausalContextAttributer/data/correct_X_pfeat.npy', X)
             np.save('CausalContextAttributer/data/corrrect_y.npy', y)
             lasso_solver = Solver.LassoSolver(coef_scaling= prompt_gen.coef_scaling())
@@ -48,7 +48,7 @@ class Attributer:
     
 
 
-    def plot_logprob_distributions(self, X, y, word_labels=None):
+    def plot_logprob_distributions(self, X, y, word_labels=None, save_path='logprob_distributions.png'):
         """
         Create a box plot for each word, showing the distribution of log probabilities
         for sample prompts with and without the word.
@@ -85,20 +85,24 @@ class Attributer:
             else:
                 print(f"Warning: No samples without '{word}' present.")
 
+        
         # Convert to DataFrame for Seaborn
         df = pd.DataFrame(data)
 
         # Create the box plot
         plt.figure(figsize=(12, 6))  # Adjust size as needed
         sns.boxplot(data=df, x='word', y='log_prob', hue='group', showmeans=True,
-                    meanprops={"marker":"o", "markerfacecolor":"white", "markeredgecolor":"black"})
+                    meanprops={"marker": "o", "markerfacecolor": "white", "markeredgecolor": "black"})
         plt.xticks(rotation=45)  # Rotate x-axis labels for readability
         plt.title("Log Probability Distributions With and Without Each Word")
         plt.xlabel("Word")
         plt.ylabel("Log Probability")
         plt.legend(title="Word Presence")
         plt.tight_layout()
-        plt.show()
+        plt.savefig(save_path)  # Save the plot to the specified file
+        print(f"Plot saved to {save_path}")
+        plt.close()  # Close the figure to free memory
+
 
 
 if __name__ == "__main__":
@@ -107,11 +111,11 @@ if __name__ == "__main__":
     attributer = Attributer(model_name=model_name)
     original_prompt = "Local Mayor Launches Initiative to Enhance Urban Public Transport."
     original_label =attributer.LLM_Handler.get_predicted_class(original_prompt)
-    prompt_gen = context_processor.EfficientPromptGenerator(LLM_handler=attributer.LLM_Handler, prompt=original_prompt, num_datasets=200)
+    prompt_gen = context_processor.EfficientPromptGenerator(LLM_handler=attributer.LLM_Handler, prompt=original_prompt, num_datasets=10)
     X, partition = prompt_gen.create_X(split_by="word", mode= "1/p featurization")
-    print(X)
-    y = prompt_gen.create_y(prompt_gen.sample_prompts, original_label)
-    attributer.plot_logprob_distributions(X,y, word_labels= partition.parts)
+    y, y_logodd, outputs = prompt_gen.create_y(prompt_gen.sample_prompts, original_label)
+    print(outputs)
+    attributer.plot_logprob_distributions(X,y, word_labels= partition.parts, save_path='CausalContextAttributer/data/logprob_distributions.png')
 
     # attributer.attribute(original_prompt=original_prompt)
 
