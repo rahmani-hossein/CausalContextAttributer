@@ -269,18 +269,17 @@ class EfficientPromptGenerator:
 
 
         y = np.zeros(len(sampled_prompts))
-        y_logodd = np.zeros(len(sampled_prompts))
+        y_lognormalized = np.zeros(len(sampled_prompts))
         predicted_label = []
         for i in range(len(sampled_prompts)):
             llm_res = self.LLM_Handler.get_classification_metrics(sampled_prompts[i], original_label)
             y[i] = llm_res['log_prob_given_label']
             
-            y_logodd[i] = llm_res['log_odds_given_label']
-            print(f"for {i} we had log odds")
+            y_lognormalized[i] = llm_res['normalized_log_prob_given_label']
             predicted_label.append(llm_res['predicted_label'])
 
 
-        return y, y_logodd, predicted_label
+        return y, y_lognormalized, predicted_label
         
 
 

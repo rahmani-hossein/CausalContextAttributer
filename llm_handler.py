@@ -46,6 +46,7 @@ class LLM_Handler:
             outputs = self.model(input_ids)
             logits = outputs.logits[:, -1, :]  # Logits for the next token
             probs = torch.softmax(logits, dim=-1)
+            print(probs.shape)
 
         # Extract log probabilities for all class labels
         class_probs = {lbl: probs[0, token].item() for lbl, token in self.class_tokens.items()}
@@ -55,12 +56,24 @@ class LLM_Handler:
 
         # Get log probability of the given label
         prob_given_label = class_probs[label]
-        log_prob_given_label = math.log(prob_given_label)
+        log_prob_given_label = math.log(prob_given_label) if prob_given_label > 0 else float('-inf')
 
         if prob_given_label < 1:
             log_odds_given_label = math.log(prob_given_label/ (1-prob_given_label))
         else:
             log_odds_given_label = float('inf')  # Handle P=1 case
+        
+        # Calculate sum of probabilities of all class labels
+        sum_class_probs = sum(class_probs.values())
+
+        # Compute normalized probability for given label
+        if sum_class_probs > 0:
+            normalized_prob_given_label = prob_given_label / sum_class_probs
+            normalized_prob_predicted_label = class_probs[predicted_label] / sum_class_probs
+
+        else:
+            normalized_prob_given_label = 0.0
+            normalized_prob_predicted_label = 0.0
         
 
         # Return all metrics in a dictionary
@@ -69,7 +82,9 @@ class LLM_Handler:
             'predicted_label': predicted_label,
             'log_odds_given_label': log_odds_given_label,
             'log_prob_given_label': log_prob_given_label,
-            'prob_predicted_label': class_probs[predicted_label]
+            'prob_predicted_label': class_probs[predicted_label],
+            'normalized_log_prob_given_label': math.log(normalized_prob_given_label) if normalized_prob_given_label > 0 else float('-inf'),
+            'normalized_log_prob_predicted_label': math.log(normalized_prob_predicted_label) if normalized_prob_predicted_label > 0 else float('-inf')
         }
     
     # def getClassification_log_prob(self, prompt: str, label: str) -> float:

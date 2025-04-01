@@ -21,12 +21,12 @@ class Attributer:
         self.LLM_Handler = LLM_Handler(class_labels, hf_auth_token, model_name)
         
 
-    def attribute(self, original_prompt, split_by = "word", mode = "classification"):
+    def attribute(self, original_prompt, num_datasets = 2000, split_by = "word", mode = "classification"):
         if mode == "classification":
             original_label =self.LLM_Handler.get_predicted_class(original_prompt)
-            prompt_gen = context_processor.EfficientPromptGenerator(LLM_handler=self.LLM_Handler, prompt=original_prompt, num_datasets=5)
+            prompt_gen = context_processor.EfficientPromptGenerator(LLM_handler=self.LLM_Handler, prompt=original_prompt, num_datasets=num_datasets)
             X, partition = prompt_gen.create_X(split_by="word", mode= "1/p featurization")
-            y, y_logodd, outputs = prompt_gen.create_y(prompt_gen.sample_prompts, original_label=original_label)
+            y, y_lognormalized, outputs = prompt_gen.create_y(prompt_gen.sample_prompts, original_label=original_label)
             np.save('CausalContextAttributer/data/correct_X_pfeat.npy', X)
             np.save('CausalContextAttributer/data/corrrect_y.npy', y)
             lasso_solver = Solver.LassoSolver(coef_scaling= prompt_gen.coef_scaling())
@@ -111,13 +111,16 @@ if __name__ == "__main__":
     attributer = Attributer(model_name=model_name)
     original_prompt = "Local Mayor Launches Initiative to Enhance Urban Public Transport."
     original_label =attributer.LLM_Handler.get_predicted_class(original_prompt)
-    prompt_gen = context_processor.EfficientPromptGenerator(LLM_handler=attributer.LLM_Handler, prompt=original_prompt, num_datasets=10)
+    prompt_gen = context_processor.EfficientPromptGenerator(LLM_handler=attributer.LLM_Handler, prompt=original_prompt, num_datasets=100)
     X, partition = prompt_gen.create_X(split_by="word", mode= "1/p featurization")
-    y, y_logodd, outputs = prompt_gen.create_y(prompt_gen.sample_prompts, original_label)
-    print(outputs)
+    y, y_lognormalized, outputs = prompt_gen.create_y(prompt_gen.sample_prompts, original_label)
+    m = X.shape[0]
+    for i in range(m):
+        print(f'for sampled prompt {i} with prob {prompt_gen.ps[i]}: {prompt_gen.sample_prompts[i]} got classification answer {outputs[i]} with logprob {y[i]} with normalized logprob {y_lognormalized[i]}')
+
     attributer.plot_logprob_distributions(X,y, word_labels= partition.parts, save_path='CausalContextAttributer/data/logprob_distributions.png')
 
-    # attributer.attribute(original_prompt=original_prompt)
+    # attributer.attribute(original_prompt=original_prompt, num_datasets=2000)
 
 
 
