@@ -242,79 +242,170 @@ class Attributer:
         # You can save html_output.data to an HTML file or display in Jupyter
         print("Captum Visualization HTML generated (display in browser/notebook).")
 
-
-    def attribute_shap(self, text: str, target_label: str) -> List[Tuple[str, float]]:
-        """Computes word-level attributions using SHAP's KernelExplainer."""
+    def attribute_shap(self, text: str, target_label: str, nsamples: int = 100) -> List[Tuple[str, float]]:
+        """
+        Computes word-level attributions using SHAP's Explainer with custom tokenizer.
+        
+        Args:
+            text: Input text to analyze
+            target_label: Target class label to explain
+            
+        Returns:
+            List of (word, attribution) tuples
+        """
         print(f"\n--- Running SHAP Attribution for label: {target_label} ---")
-        words = self.LLM_Handler.tokenizer.tokenize(text)  # For display purposes
-        print("Debug: Words (LLaMA tokens):", words)
-
-
-        def predict_proba(text_list: np.ndarray, label, mode="prob") -> np.ndarray:
+        
+        # Define custom tokenizer function
+        def custom_tokenizer(s, return_offsets_mapping=True):
+            """Custom tokenizer that splits on word boundaries."""
+            import re
+            pos = 0
+            offset_ranges = []
+            input_ids = []
+            
+            # Find all word boundaries
+            for m in re.finditer(r'\b\w+\b', s):
+                start, end = m.span(0)
+                # Add any non-word characters before this word
+                if start > pos:
+                    offset_ranges.append((pos, start))
+                    input_ids.append(s[pos:start])
+                # Add the word
+                offset_ranges.append((start, end))
+                input_ids.append(s[start:end])
+                pos = end
+                
+            # Add any remaining text
+            if pos != len(s):
+                offset_ranges.append((pos, len(s)))
+                input_ids.append(s[pos:])
+                
+            out = {
+                "input_ids": input_ids,
+            }
+            if return_offsets_mapping:
+                out["offset_mapping"] = offset_ranges
+            return out
+        
+        # Define prediction function
+        def predict_fn(texts):
+            """Wrapper for model predictions."""
             scores = []
-            print("Debug: predict_proba inputs:", text_list)
-            for prompt_text in text_list:
-                metrics = self.LLM_Handler.get_classification_metrics(prompt_text, label)
-
-                if mode == "prob":
-                    # Use normalized probability within the defined classes
-                    probability = metrics.get('normalized_prob_given_label')
-                    probability = float(probability) if probability is not None else 0.5
-                    scores.append(probability)
-
-                elif mode == "log":
-                    log_probability = metrics.get('normalized_log_prob_given_label')
-                    log_probability = float(log_probability) if log_probability is not None else math.log(0.5)
-                    scores.append(log_probability)
-            result = np.array(scores, dtype=np.float64).reshape(-1, 1)
-            print("Debug: predict_proba output:", result)
-            return result # Ensure 2D output (n_samples, 1)
-
-        # Custom masking function
-        def mask_text(texts, mask):
-            masked_texts = []
-            for t in texts:
-                tokens = self.LLM_Handler.tokenizer.tokenize(t)
-                # Ensure mask length matches tokens
-                if len(mask) != len(tokens):
-                    mask = mask[:len(tokens)]  # Truncate if needed
-                masked = [tok if m else "[MASK]" for tok, m in zip(tokens, mask)]
-                masked_text = self.LLM_Handler.tokenizer.convert_tokens_to_string(masked)
-                masked_texts.append(masked_text)
-            print("Debug: masked_texts:", masked_texts)
-            return np.array(masked_texts)
-
-        # Wrapper that applies masking
-        def wrapped_predict(X):
-            # X is a binary mask matrix from KernelExplainer (shape: n_samples, n_features)
-            print("Debug: wrapped_predict X (mask):", X)
-            masked_inputs = []
-            for mask_row in X:
-                # Apply mask to the original text
-                masked_text = mask_text([text], mask_row)[0]
-                masked_inputs.append(masked_text)
-            masked_inputs = np.array(masked_inputs)
-            print("Debug: wrapped_predict masked_inputs:", masked_inputs)
-            return predict_proba(masked_inputs, target_label)
-
+            for text in texts:
+                metrics = self.LLM_Handler.get_classification_metrics(text, target_label)
+                # Use log probabilities for more stable SHAP values
+                prob = metrics.get('normalized_prob_given_label', 0.5)
+                scores.append(float(prob))
+            return np.array(scores).reshape(-1, 1)
+        
         try:
-            # Background: original text (single sample)
-            background = np.array([text])
-
-            explainer = shap.KernelExplainer(wrapped_predict, background)
-            print("Debug: Explainer created")
-
+            # Create masker with custom tokenizer
+            masker = shap.maskers.Text(custom_tokenizer)
+            
+            # Create explainer
+            explainer = shap.Explainer(
+                predict_fn,
+                masker,
+                output_names=[target_label],
+                max_evals=nsamples
+            )
+            
             # Compute SHAP values
-            shap_values = explainer.shap_values(np.ones((1, len(words))), nsamples=100)
-            print("Debug: shap_values:", shap_values)
-
-            word_attributions = list(zip(words, shap_values[0]))
-            print(f"SHAP Attributions: {word_attributions}")
+            shap_values = explainer([text])
+            
+            # Extract word attributions
+            words = re.findall(r'\b\w+\b', text)
+            attributions = shap_values.values[0]
+            
+            # Match words with their attributions
+            word_attributions = []
+            current_word_idx = 0
+            
+            for i, (word, attr) in enumerate(zip(words, attributions)):
+                if word.strip():  # Only include non-empty words
+                    word_attributions.append((word, float(attr)))
+            
+            # print(f"SHAP Attributions: {word_attributions}")
             return word_attributions
-
+            
         except Exception as e:
             print(f"Error in SHAP attribution: {str(e)}")
+            import traceback
+            traceback.print_exc()
             return []
+        
+    # def attribute_shap(self, text: str, target_label: str) -> List[Tuple[str, float]]:
+    #     """Computes word-level attributions using SHAP's KernelExplainer."""
+    #     print(f"\n--- Running SHAP Attribution for label: {target_label} ---")
+    #     words = self.LLM_Handler.tokenizer.tokenize(text)  # For display purposes
+    #     print("Debug: Words (LLaMA tokens):", words)
+
+
+    #     def predict_proba(text_list: np.ndarray, label, mode="prob") -> np.ndarray:
+    #         scores = []
+    #         print("Debug: predict_proba inputs:", text_list)
+    #         for prompt_text in text_list:
+    #             metrics = self.LLM_Handler.get_classification_metrics(prompt_text, label)
+
+    #             if mode == "prob":
+    #                 # Use normalized probability within the defined classes
+    #                 probability = metrics.get('normalized_prob_given_label')
+    #                 probability = float(probability) if probability is not None else 0.5
+    #                 scores.append(probability)
+
+    #             elif mode == "log":
+    #                 log_probability = metrics.get('normalized_log_prob_given_label')
+    #                 log_probability = float(log_probability) if log_probability is not None else math.log(0.5)
+    #                 scores.append(log_probability)
+    #         result = np.array(scores, dtype=np.float64).reshape(-1, 1)
+    #         print("Debug: predict_proba output:", result)
+    #         return result # Ensure 2D output (n_samples, 1)
+
+    #     # Custom masking function
+    #     def mask_text(texts, mask):
+    #         masked_texts = []
+    #         for t in texts:
+    #             tokens = self.LLM_Handler.tokenizer.tokenize(t)
+    #             # Ensure mask length matches tokens
+    #             if len(mask) != len(tokens):
+    #                 mask = mask[:len(tokens)]  # Truncate if needed
+    #             masked = [tok if m else "[MASK]" for tok, m in zip(tokens, mask)]
+    #             masked_text = self.LLM_Handler.tokenizer.convert_tokens_to_string(masked)
+    #             masked_texts.append(masked_text)
+    #         print("Debug: masked_texts:", masked_texts)
+    #         return np.array(masked_texts)
+
+    #     # Wrapper that applies masking
+    #     def wrapped_predict(X):
+    #         # X is a binary mask matrix from KernelExplainer (shape: n_samples, n_features)
+    #         print("Debug: wrapped_predict X (mask):", X)
+    #         masked_inputs = []
+    #         for mask_row in X:
+    #             # Apply mask to the original text
+    #             masked_text = mask_text([text], mask_row)[0]
+    #             masked_inputs.append(masked_text)
+    #         masked_inputs = np.array(masked_inputs)
+    #         print("Debug: wrapped_predict masked_inputs:", masked_inputs)
+    #         return predict_proba(masked_inputs, target_label)
+
+    #     try:
+    #         # Background: original text (single sample)
+    #         background = np.array([text])
+
+    #         explainer = shap.KernelExplainer(wrapped_predict, background)
+    #         print("Debug: Explainer created")
+
+    #         # Compute SHAP values
+    #         shap_values = explainer.shap_values(np.ones((1, len(words))), nsamples=100)
+    #         print("Debug: shap_values:", shap_values)
+
+    #         word_attributions = list(zip(words, shap_values[0]))
+    #         print(f"SHAP Attributions: {word_attributions}")
+    #         return word_attributions
+
+    #     except Exception as e:
+    #         print(f"Error in SHAP attribution: {str(e)}")
+    #         return []
 
 
 
@@ -323,8 +414,10 @@ if __name__ == "__main__":
     attributer = Attributer(model_name=model_name)
     text = "Local Mayor Launches Initiative to enhance urban public transport."
     target_label = "Politics"
-    shap_attributions = attributer.attribute_shap(text, target_label)
+    shap_attributions = attributer.attribute_shap(text, target_label, nsamples=10)
     print(shap_attributions)
+
+    # ame_attributions = attributer.attribute(text)
 
 
 # if __name__ == "__main__":
