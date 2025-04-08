@@ -38,6 +38,7 @@ class LLM_Handler:
                 - 'log_prob_given_label': Log probability of the given label (float).
         """
         # Encode the prompt
+        print("i am processing method get classification metrics on ", prompt)
         prompt = f"Classify this headline: {prompt}. The category is: "
         input_ids = self.tokenizer.encode(prompt, return_tensors="pt").to(self.device)
         
@@ -46,7 +47,6 @@ class LLM_Handler:
             outputs = self.model(input_ids)
             logits = outputs.logits[:, -1, :]  # Logits for the next token
             probs = torch.softmax(logits, dim=-1)
-            print(probs.shape)
 
         # Extract log probabilities for all class labels
         class_probs = {lbl: probs[0, token].item() for lbl, token in self.class_tokens.items()}
@@ -80,23 +80,14 @@ class LLM_Handler:
         return {
             'prob_given_label':prob_given_label,
             'predicted_label': predicted_label,
-            'log_odds_given_label': log_odds_given_label,
+            # 'log_odds_given_label': log_odds_given_label,
             'log_prob_given_label': log_prob_given_label,
             'prob_predicted_label': class_probs[predicted_label],
+            'normalized_prob_given_label': normalized_prob_given_label,
             'normalized_log_prob_given_label': math.log(normalized_prob_given_label) if normalized_prob_given_label > 0 else float('-inf'),
             'normalized_log_prob_predicted_label': math.log(normalized_prob_predicted_label) if normalized_prob_predicted_label > 0 else float('-inf')
         }
     
-    # def getClassification_log_prob(self, prompt: str, label: str) -> float:
-    #     """Compute log probability of a label given a sampled prompt (prompt with some words deleted)."""
-
-    #     input_ids = self.tokenizer.encode(prompt, return_tensors="pt").to(self.device)
-    #     with torch.no_grad():
-    #         outputs = self.model(input_ids)
-    #         logits = outputs.logits[:, -1, :]  # Logits for next token
-    #         log_probs = torch.log_softmax(logits, dim=-1)
-    #         token_id = self.class_tokens[label]
-    #         return log_probs[0, token_id].item()
 
     def get_predicted_class(self, headline: str) -> str:
         """Get the predicted class for a headline."""
