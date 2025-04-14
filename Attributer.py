@@ -9,7 +9,6 @@ import Solver
 import pandas as pd
 import seaborn as sns
 import matplotlib.pyplot as plt
-import os
 import re # Import re for word splitting
 import math
 
@@ -25,16 +24,20 @@ matplotlib.use("Agg")  # non‑GUI backend :contentReference[oaicite:0]{index=0}
 
 
 class Attributer:
-    def __init__(self, model_name: str ):  # Use an accessible model
+    def __init__(self, llm_handler: LLM_Handler):  # Use an accessible model
         """Initialize the model and tokenizer."""
+        if llm_handler != None:
+            self.LLM_Handler = llm_handler
+        else:
+            load_dotenv('/home/hrahmani/CausalContextAttributer/config.env')
+            hf_auth_token  = os.environ.get("HF_API_KEY")
+            class_labels = ["Technology", "Politics", "Sports", "Art", "Other"]
+            self.LLM_Handler = LLM_Handler(class_labels, hf_auth_token, "meta-llama/Llama-3.2-1B")
 
-        load_dotenv('/home/hrahmani/CausalContextAttributer/config.env')
-        hf_auth_token  = os.environ.get("HF_API_KEY")
-        class_labels = ["Technology", "Politics", "Sports", "Art", "Other"]
-        self.LLM_Handler = LLM_Handler(class_labels, hf_auth_token, model_name)
+        
         
 
-    def attribute(self, original_prompt, num_datasets = 2000, split_by = "word", mode = "classification"):
+    def attribute(self, original_prompt, num_datasets = 2000, split_by = "word", mode = "classification", method_name = 'lasso'):
         if mode == "classification":
             original_label =self.LLM_Handler.get_predicted_class(original_prompt)
             prompt_gen = context_processor.EfficientPromptGenerator(LLM_handler=self.LLM_Handler, prompt=original_prompt, num_datasets=num_datasets)
@@ -42,22 +45,29 @@ class Attributer:
             y, y_lognormalized, outputs = prompt_gen.create_y(prompt_gen.sample_prompts, original_label=original_label)
             np.save('CausalContextAttributer/data/correct_X_pfeat.npy', X)
             np.save('CausalContextAttributer/data/corrrect_y.npy', y)
-            lasso_solver = Solver.LassoSolver(coef_scaling= prompt_gen.coef_scaling())
-            res = lasso_solver.fit(X, y)
-            print("Lasso Coefficients:", res)
-              # Get results for all treatments
-            all_results = Solver.estimate_all_treatments(X, y)
-            
-            # Print summary
-            print("\nResults Summary:")
-            print("-" * 50)
-            for treatment, results in all_results.items():
-                print(f"\n{treatment}:")
-                print(f"ATE: {results['ate']:.3f}")
-                print(f"Final Loss: {results['final_loss']:.4f}")
-                print(f"CATE std: {np.std(results['cate_estimates']):.3f}")
+            if method_name =='lasso':
+                lasso_solver = Solver.LassoSolver(coef_scaling= prompt_gen.coef_scaling())
+                res = lasso_solver.fit(X, y)
+                print("Lasso Coefficients:", res)
 
-        return results['ate']
+                return res
+            
+            else:
+              # Get results for all treatments
+                all_results = Solver.estimate_all_treatments(X, y)
+                
+                # Print summary
+                print("\nResults Summary:")
+                print("-" * 50)
+                for treatment, results in all_results.items():
+                    print(f"\n{treatment}:")
+                    print(f"ATE: {results['ate']:.3f}")
+                    print(f"Final Loss: {results['final_loss']:.4f}")
+                    print(f"CATE std: {np.std(results['cate_estimates']):.3f}")
+
+                    return results['ate']
+
+        
     
 
 
@@ -288,14 +298,18 @@ class Attributer:
             return out
         
         # Define prediction function
-        def predict_fn(texts):
+        def predict_fn(texts, mode = 'prob'):
             """Wrapper for model predictions."""
             scores = []
             for text in texts:
                 metrics = self.LLM_Handler.get_classification_metrics(text, target_label)
                 # Use log probabilities for more stable SHAP values
-                prob = metrics.get('normalized_prob_given_label', 0.5)
-                scores.append(float(prob))
+                if mode == 'prob':
+                    prob = metrics.get('normalized_prob_given_label')
+                    scores.append(float(prob))
+                elif mode =='log':
+                    log_prob = metrics.get('normalized_log_prob_given_label')
+                    scores.append(float(log_prob))
             return np.array(scores).reshape(-1, 1)
         
         try:
@@ -333,88 +347,19 @@ class Attributer:
             import traceback
             traceback.print_exc()
             return []
-        
-    # def attribute_shap(self, text: str, target_label: str) -> List[Tuple[str, float]]:
-    #     """Computes word-level attributions using SHAP's KernelExplainer."""
-    #     print(f"\n--- Running SHAP Attribution for label: {target_label} ---")
-    #     words = self.LLM_Handler.tokenizer.tokenize(text)  # For display purposes
-    #     print("Debug: Words (LLaMA tokens):", words)
-
-
-    #     def predict_proba(text_list: np.ndarray, label, mode="prob") -> np.ndarray:
-    #         scores = []
-    #         print("Debug: predict_proba inputs:", text_list)
-    #         for prompt_text in text_list:
-    #             metrics = self.LLM_Handler.get_classification_metrics(prompt_text, label)
-
-    #             if mode == "prob":
-    #                 # Use normalized probability within the defined classes
-    #                 probability = metrics.get('normalized_prob_given_label')
-    #                 probability = float(probability) if probability is not None else 0.5
-    #                 scores.append(probability)
-
-    #             elif mode == "log":
-    #                 log_probability = metrics.get('normalized_log_prob_given_label')
-    #                 log_probability = float(log_probability) if log_probability is not None else math.log(0.5)
-    #                 scores.append(log_probability)
-    #         result = np.array(scores, dtype=np.float64).reshape(-1, 1)
-    #         print("Debug: predict_proba output:", result)
-    #         return result # Ensure 2D output (n_samples, 1)
-
-    #     # Custom masking function
-    #     def mask_text(texts, mask):
-    #         masked_texts = []
-    #         for t in texts:
-    #             tokens = self.LLM_Handler.tokenizer.tokenize(t)
-    #             # Ensure mask length matches tokens
-    #             if len(mask) != len(tokens):
-    #                 mask = mask[:len(tokens)]  # Truncate if needed
-    #             masked = [tok if m else "[MASK]" for tok, m in zip(tokens, mask)]
-    #             masked_text = self.LLM_Handler.tokenizer.convert_tokens_to_string(masked)
-    #             masked_texts.append(masked_text)
-    #         print("Debug: masked_texts:", masked_texts)
-    #         return np.array(masked_texts)
-
-    #     # Wrapper that applies masking
-    #     def wrapped_predict(X):
-    #         # X is a binary mask matrix from KernelExplainer (shape: n_samples, n_features)
-    #         print("Debug: wrapped_predict X (mask):", X)
-    #         masked_inputs = []
-    #         for mask_row in X:
-    #             # Apply mask to the original text
-    #             masked_text = mask_text([text], mask_row)[0]
-    #             masked_inputs.append(masked_text)
-    #         masked_inputs = np.array(masked_inputs)
-    #         print("Debug: wrapped_predict masked_inputs:", masked_inputs)
-    #         return predict_proba(masked_inputs, target_label)
-
-    #     try:
-    #         # Background: original text (single sample)
-    #         background = np.array([text])
-
-    #         explainer = shap.KernelExplainer(wrapped_predict, background)
-    #         print("Debug: Explainer created")
-
-    #         # Compute SHAP values
-    #         shap_values = explainer.shap_values(np.ones((1, len(words))), nsamples=100)
-    #         print("Debug: shap_values:", shap_values)
-
-    #         word_attributions = list(zip(words, shap_values[0]))
-    #         print(f"SHAP Attributions: {word_attributions}")
-    #         return word_attributions
-
-    #     except Exception as e:
-    #         print(f"Error in SHAP attribution: {str(e)}")
-    #         return []
 
 
 
 if __name__ == "__main__":
     model_name = "meta-llama/Llama-3.2-1B"
-    attributer = Attributer(model_name=model_name)
+    load_dotenv('/home/hrahmani/CausalContextAttributer/config.env')
+    hf_auth_token  = os.environ.get("HF_API_KEY")
+    class_labels = ["Technology", "Politics", "Sports", "Art", "Other"]
+    llm_handler = LLM_Handler(class_labels, hf_auth_token, model_name)
+    attributer = Attributer(llm_handler=llm_handler)
     text = "Local Mayor Launches Initiative to enhance urban public transport."
     target_label = "Politics"
-    shap_attributions = attributer.attribute_shap(text, target_label, nsamples=10)
+    shap_attributions = attributer.attribute_shap(text, target_label, nsamples=1000)
     print(shap_attributions)
 
     # ame_attributions = attributer.attribute(text)

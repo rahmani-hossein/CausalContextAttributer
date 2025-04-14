@@ -38,7 +38,7 @@ class LLM_Handler:
                 - 'log_prob_given_label': Log probability of the given label (float).
         """
         # Encode the prompt
-        print("i am processing method get classification metrics on ", prompt)
+        print("we get the prompt for the LLM: ", prompt)
         prompt = f"Classify this headline: {prompt}. The category is: "
         input_ids = self.tokenizer.encode(prompt, return_tensors="pt").to(self.device)
         
