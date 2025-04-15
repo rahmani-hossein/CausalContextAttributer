@@ -266,6 +266,8 @@ class PytorchRLearner:
             shuffle=True
         )
     
+    
+    
     def estimate_cate(self, X, T, y):
         """
         Estimate CATE using R-learning with PyTorch optimization
@@ -322,8 +324,8 @@ class PytorchRLearner:
         # Get CATE estimates for all samples
         self.cate_model.eval()
         with torch.no_grad():
-            X_all_torch = self._to_torch(X_train_nuisance)
-            cate_estimates = self.cate_model(X_all_torch).numpy().flatten()
+            uniform_samples = torch.from_numpy(utils.generate_bernoulli_matrix(n_features=X.shape[1], n_samples=1000, p_min=0, p_max=1))
+            cate_estimates = self.cate_model(uniform_samples).numpy().flatten()
         
         return {
             'cate_estimates': cate_estimates,
@@ -347,7 +349,7 @@ def estimate_all_treatments(X, y):
         # Initialize and fit R-learner
         rlearner = PytorchRLearner(
             learning_rate=0.01,
-            n_epochs=1000,
+            n_epochs=2000,
             batch_size=32
         )
         treatment_results = rlearner.estimate_cate(X_reduced, T, y)

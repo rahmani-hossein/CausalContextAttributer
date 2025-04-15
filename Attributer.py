@@ -65,7 +65,8 @@ class Attributer:
                 print("Lasso Coefficients as (word, score) pairs:", word_attributions)
                 return word_attributions
             
-            else:
+            elif method_name =='orthogonal':
+                print('we are doing the orthogonal method')
               # Get results for all treatments
                 all_results = Solver.estimate_all_treatments(X, y)
                 word_attributions = []
@@ -433,7 +434,7 @@ if __name__ == "__main__":
     text = "Local Mayor Launches Initiative to enhance urban public transport."
     target_label = "Politics"
         # Get attributions as (word, score) tuples
-    ame_attributions = attributer.attribute(text, num_datasets=1000)
+    ame_attributions = attributer.attribute(text, num_datasets=1000, method_name = 'orthogonal')
 
     # Print results
     print("\nAME Attributions:")
