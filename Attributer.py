@@ -10,14 +10,12 @@ import pandas as pd
 import seaborn as sns
 import matplotlib.pyplot as plt
 import re # Import re for word splitting
-import math
+from scipy.stats import spearmanr
 
 # Import necessary libraries for SHAP and IG
 import shap
 from captum.attr import IntegratedGradients, LayerIntegratedGradients, visualization as viz
 from captum.attr._utils.visualization import format_word_importances # For better text viz
-from datasets import load_dataset # To load a standard dataset
-
 import matplotlib
 # 1) If you ever use any matplotlib plots (e.g. bar charts), force Agg on headless:
 matplotlib.use("Agg")  # non‑GUI backend :contentReference[oaicite:0]{index=0}
@@ -37,37 +35,57 @@ class Attributer:
         
         
 
-    def attribute(self, original_prompt, num_datasets = 2000, split_by = "word", mode = "classification", method_name = 'lasso'):
+    def attribute(self, original_prompt, num_datasets = 2000, split_by = "word", mode = "classification", method_name = 'lasso', save_data = False):
+        """
+        Compute attributions and return as (word, score) tuples.
+        
+        Args:
+            original_prompt: Input text to analyze
+            num_datasets: Number of samples for AME
+            split_by: How to split text ("word" or "sentence")
+            mode: Type of task ("classification")
+            method_name: Attribution method ('lasso' or other)
+            
+        Returns:
+            List[Tuple[str, float]]: List of (word, attribution_score) tuples
+        """
         if mode == "classification":
             original_label =self.LLM_Handler.get_predicted_class(original_prompt)
             prompt_gen = context_processor.EfficientPromptGenerator(LLM_handler=self.LLM_Handler, prompt=original_prompt, num_datasets=num_datasets)
             X, partition = prompt_gen.create_X(split_by="word", mode= "1/p featurization")
             y, y_lognormalized, outputs = prompt_gen.create_y(prompt_gen.sample_prompts, original_label=original_label)
-            np.save('CausalContextAttributer/data/correct_X_pfeat.npy', X)
-            np.save('CausalContextAttributer/data/corrrect_y.npy', y)
+            if save_data:
+                np.save(f'CausalContextAttributer/data/correct_X_{original_prompt[:5]}continue.npy', X)
+                np.save(f'CausalContextAttributer/data/corrrect_y_{original_prompt[:5]}continue.npy', y_lognormalized)
             if method_name =='lasso':
                 lasso_solver = Solver.LassoSolver(coef_scaling= prompt_gen.coef_scaling())
-                res = lasso_solver.fit(X, y)
-                print("Lasso Coefficients:", res)
-
-                return res
+                coefficients = lasso_solver.fit(X, y_lognormalized)
+                word_attributions = list(zip(partition.parts, coefficients))
+            
+                print("Lasso Coefficients as (word, score) pairs:", word_attributions)
+                return word_attributions
             
             else:
               # Get results for all treatments
                 all_results = Solver.estimate_all_treatments(X, y)
+                word_attributions = []
+                for i, word in enumerate(partition.parts):
+                    treatment_key = f'treatment_{i}'
+                    if treatment_key in all_results:
+                        ate_score = all_results[treatment_key]['ate']
+                        word_attributions.append((word, ate_score))
+
+                        # print("\nResults Summary:")
+                # print("-" * 50)
+                # for treatment, results in all_results.items():
+                #     print(f"\n{treatment}:")
+                #     print(f"ATE: {results['ate']:.3f}")
+                #     print(f"Final Loss: {results['final_loss']:.4f}")
+                #     print(f"CATE std: {np.std(results['cate_estimates']):.3f}")
+
+                #     return results['ate']
                 
-                # Print summary
-                print("\nResults Summary:")
-                print("-" * 50)
-                for treatment, results in all_results.items():
-                    print(f"\n{treatment}:")
-                    print(f"ATE: {results['ate']:.3f}")
-                    print(f"Final Loss: {results['final_loss']:.4f}")
-                    print(f"CATE std: {np.std(results['cate_estimates']):.3f}")
-
-                    return results['ate']
-
-        
+                return word_attributions
     
 
 
@@ -252,6 +270,8 @@ class Attributer:
         # You can save html_output.data to an HTML file or display in Jupyter
         print("Captum Visualization HTML generated (display in browser/notebook).")
 
+    
+
     def attribute_shap(self, text: str, target_label: str, nsamples: int = 100) -> List[Tuple[str, float]]:
         """
         Computes word-level attributions using SHAP's Explainer with custom tokenizer.
@@ -332,9 +352,7 @@ class Attributer:
             attributions = shap_values.values[0]
             
             # Match words with their attributions
-            word_attributions = []
-            current_word_idx = 0
-            
+            word_attributions = []            
             for i, (word, attr) in enumerate(zip(words, attributions)):
                 if word.strip():  # Only include non-empty words
                     word_attributions.append((word, float(attr)))
@@ -347,6 +365,61 @@ class Attributer:
             import traceback
             traceback.print_exc()
             return []
+        
+    def compute_spearman_correlation(
+        self,
+        shap_attrs: List[Tuple[str, float]],
+        ame_attrs: List[Tuple[str, float]]
+    ) -> float:
+        """Compute Spearman correlation between SHAP and AME attributions."""
+        # Create word to score mapping
+        shap_scores = {word: score for word, score in shap_attrs}
+        ame_scores = {word: score for word, score in ame_attrs}
+        
+        # Get common words
+        common_words = set(shap_scores.keys()) & set(ame_scores.keys())
+        
+        # Create score arrays
+        shap_array = [shap_scores[word] for word in common_words]
+        ame_array = [ame_scores[word] for word in common_words]
+        
+        # Compute correlation
+        correlation, _ = spearmanr(shap_array, ame_array)
+        return correlation
+    
+    def compute_log_prob_drop(self, text: str, attributions: List[Tuple[str, float]], k: int = 1) -> Dict[str, float]:
+        """
+        Compute the drop in log probability when removing top k most important words.
+        
+        Args:
+            text: Original input text
+            attributions: List of (word, score) tuples from attribution method
+            k: Number of top words to remove
+            
+        Returns:
+            Dict containing metrics about the probability changes
+        """
+        # Get original prediction and probability
+        original_label = self.LLM_Handler.get_predicted_class(text)
+        original_metrics = self.LLM_Handler.get_classification_metrics(text, original_label)
+        original_log_prob = original_metrics['normalized_log_prob_given_label']
+        print(original_log_prob)
+        # Sort words by absolute attribution score
+        sorted_words = sorted(attributions, key=lambda x: abs(x[1]), reverse=True)
+        words_to_remove = [word for word, _ in sorted_words[:k]]
+        
+        # Create modified text by replacing top k words with __
+        modified_text = text
+        for word in words_to_remove:
+            modified_text = re.sub(r'\b' + re.escape(word) + r'\b', '__', modified_text)
+        
+        print(modified_text)
+        # Get new prediction and probability
+        modified_metrics = self.LLM_Handler.get_classification_metrics(modified_text, original_label)
+        modified_log_prob = modified_metrics['normalized_log_prob_given_label']
+        print(modified_log_prob)
+        
+        return original_log_prob - modified_log_prob
 
 
 
@@ -359,12 +432,26 @@ if __name__ == "__main__":
     attributer = Attributer(llm_handler=llm_handler)
     text = "Local Mayor Launches Initiative to enhance urban public transport."
     target_label = "Politics"
+        # Get attributions as (word, score) tuples
+    ame_attributions = attributer.attribute(text, num_datasets=1000)
+
+    # Print results
+    print("\nAME Attributions:")
+    for word, score in ame_attributions:
+        print(f"{word}: {score:.4f}")
+    
+    print("by AME normalized log probability drops by", attributer.compute_log_prob_drop(text, ame_attributions, k=1))
+
+    # Compare with SHAP
     shap_attributions = attributer.attribute_shap(text, target_label, nsamples=1000)
-    print(shap_attributions)
+    print("\nSHAP Attributions:")
+    for word, score in shap_attributions:
+        print(f"{word}: {score:.4f}")
+    
 
     # ame_attributions = attributer.attribute(text)
 
-
+    
 # if __name__ == "__main__":
 #     model_name = "meta-llama/Llama-3.2-1B"
     
@@ -382,106 +469,3 @@ if __name__ == "__main__":
     # attributer.plot_logprob_distributions(X,y, word_labels= partition.parts, save_path='CausalContextAttributer/data/logprob_distributions.png')
 
     # attributer.attribute(original_prompt=original_prompt, num_datasets=2000)
-
-
-
-
-
-
-
-# Helper function to summarize attributions across subword tokens
-def summarize_attributions(attributions, token_offsets, words):
-    """Aggregates token attributions to word level."""
-    word_attributions = np.zeros(len(words))
-    word_indices = [] # Keep track of which word each token belongs to
-
-    current_word_idx = 0
-    for i, (start, end) in enumerate(token_offsets):
-        # Find the word corresponding to the token's start position
-        # This is a simple approach; more robust mapping might be needed for complex tokenization
-        while current_word_idx < len(words) and start >= len(" ".join(words[:current_word_idx+1])):
-             current_word_idx += 1
-        if current_word_idx < len(words):
-             word_indices.append(current_word_idx)
-        else:
-             word_indices.append(-1) # Should not happen with correct offsets
-
-    # Sum attributions for tokens belonging to the same word
-    for i, word_idx in enumerate(word_indices):
-        if word_idx != -1:
-             # Ensure attributions tensor is on CPU and converted to numpy
-             attr_val = attributions[i].cpu().numpy() if isinstance(attributions, torch.Tensor) else attributions[i]
-             word_attributions[word_idx] += attr_val
-
-    return list(zip(words, word_attributions))
-
-
-# # --- Main Execution Block ---
-# if __name__ == "__main__":
-#     model_name = "meta-llama/Llama-3.2-1B" # Or your chosen Llama model
-#     attributer = Attributer(model_name=model_name)
-
-#     # --- Load Dataset ---
-#     print("\nLoading dataset...")
-#     # Use AG News dataset, take a small sample from the test set
-#     try:
-#         # Load only a few samples to test
-#         num_samples_to_test = 3
-#         ag_news_dataset = load_dataset("ag_news", split=f'test[:{num_samples_to_test}]')
-#         samples = [{"text": item["text"]} for item in ag_news_dataset] # Extract text
-#         print(f"Loaded {len(samples)} samples from AG News.")
-#     except Exception as e:
-#         print(f"Failed to load dataset: {e}")
-#         # Fallback sample if dataset loading fails
-#         samples = [
-#             {"text": "Local Mayor Launches Initiative to Enhance Urban Public Transport."},
-#             {"text": "FC Barcelona secures victory in the final match of the season."},
-#             {"text": "New AI discovers patterns in ancient star formations."},
-#             {"text": "Renowned artist unveils controversial new sculpture downtown."},
-#         ]
-#         print("Using fallback samples.")
-
-
-#     # --- Process Each Sample ---
-#     for i, sample in enumerate(samples):
-#         original_prompt = sample["text"]
-#         print(f"\n===== Processing Sample {i+1} =====")
-#         print(f"Original Text: {original_prompt}")
-
-#         # 1. Get the model's predicted label from the defined categories
-#         predicted_label = attributer.LLM_Handler.get_predicted_class(original_prompt)
-#         print(f"Predicted Label: {predicted_label}")
-
-#         # Check if prediction is valid before proceeding
-#         if predicted_label not in attributer.class_labels:
-#             print(f"Warning: Predicted label '{predicted_label}' not in defined class labels. Skipping attributions.")
-#             continue
-
-#         # 2. Run your original attribution method (if desired)
-#         #    Note: This returns ATE/Lasso coeffs, not directly comparable word scores like SHAP/IG
-#         #    Adjust num_datasets for speed during testing
-#         try:
-#             # Reducing num_datasets significantly for faster testing
-#             user_method_results = attributer.attribute(original_prompt, num_datasets=100)
-#             # print(f"User Method Results (Lasso Coefs): {user_method_results}")
-#         except Exception as e:
-#             print(f"Error running original attribution method: {e}")
-
-#         # 3. Run SHAP attribution
-#         try:
-#             shap_results = attributer.attribute_shap(original_prompt, predicted_label)
-#             # print(f"SHAP Results: {shap_results}")
-#         except Exception as e:
-#             print(f"Error running SHAP attribution: {e}")
-
-
-#         # 4. Run Integrated Gradients attribution
-#         try:
-#             ig_results = attributer.attribute_integrated_gradients(original_prompt, predicted_label)
-#             # print(f"Integrated Gradients Results (Token Level): {ig_results}")
-#         except Exception as e:
-#             print(f"Error running Integrated Gradients attribution: {e}")
-
-#         print(f"===== Finished Sample {i+1} =====")
-
-#     print("\nComparison Finished.")
