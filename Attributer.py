@@ -33,7 +33,27 @@ class Attributer:
             self.LLM_Handler = LLM_Handler(class_labels, hf_auth_token, "meta-llama/Llama-3.2-1B")
 
         
+    # def ame_attributer(X, y, partition, coef_scaling, method = 'lasso'):
+    #     if method =='lasso':
+    #         lasso_solver = Solver.LassoSolver(coef_scaling)
+    #         coefficients = lasso_solver.fit(X, y)
+    #         lasso_word_attributions = list(zip(partition.parts, coefficients))     
+    #         print("Lasso Coefficients as (word, score) pairs:", lasso_word_attributions)
+    #         return lasso_word_attributions
         
+    #     elif method =='ortho':
+    #         all_results = Solver.estimate_all_treatments(X, y)
+    #         ortho_word_attributions = []
+    #         for i, word in enumerate(partition.parts):
+    #             treatment_key = f'treatment_{i}'
+    #             if treatment_key in all_results:
+    #                 ate_score = all_results[treatment_key]['ate']
+    #                 ortho_word_attributions.append((word, ate_score))
+            
+    #         return ortho_word_attributions
+
+
+
 
     def attribute(self, original_prompt, num_datasets = 2000, split_by = "word", mode = "classification", method_name = 'lasso', save_data = False):
         """
@@ -60,22 +80,41 @@ class Attributer:
             if method_name =='lasso':
                 lasso_solver = Solver.LassoSolver(coef_scaling= prompt_gen.coef_scaling())
                 coefficients = lasso_solver.fit(X, y_lognormalized)
-                word_attributions = list(zip(partition.parts, coefficients))
-            
-                print("Lasso Coefficients as (word, score) pairs:", word_attributions)
-                return word_attributions
+                lasso_word_attributions = list(zip(partition.parts, coefficients))
+                
+                print("Lasso Coefficients as (word, score) pairs:", lasso_word_attributions)
+                return lasso_word_attributions
             
             elif method_name =='orthogonal':
                 print('we are doing the orthogonal method')
-              # Get results for all treatments
-                all_results = Solver.estimate_all_treatments(X, y)
-                word_attributions = []
+                all_results = Solver.estimate_all_treatments(X, y_lognormalized)
+                ortho_word_attributions = []
                 for i, word in enumerate(partition.parts):
                     treatment_key = f'treatment_{i}'
                     if treatment_key in all_results:
                         ate_score = all_results[treatment_key]['ate']
-                        word_attributions.append((word, ate_score))
+                        ortho_word_attributions.append((word, ate_score))
+                
+                return ortho_word_attributions
+            
+            else:
+                lasso_solver = Solver.LassoSolver(coef_scaling= prompt_gen.coef_scaling())
+                coefficients = lasso_solver.fit(X, y_lognormalized)
+                lasso_word_attributions = list(zip(partition.parts, coefficients))
 
+                all_results = Solver.estimate_all_treatments(X, y_lognormalized)
+                ortho_word_attributions = []
+                for i, word in enumerate(partition.parts):
+                    treatment_key = f'treatment_{i}'
+                    if treatment_key in all_results:
+                        ate_score = all_results[treatment_key]['ate']
+                        ortho_word_attributions.append((word, ate_score))
+                
+                return (lasso_word_attributions, ortho_word_attributions)
+
+
+                 
+                 
                         # print("\nResults Summary:")
                 # print("-" * 50)
                 # for treatment, results in all_results.items():
@@ -86,7 +125,7 @@ class Attributer:
 
                 #     return results['ate']
                 
-                return word_attributions
+                # return lasso_word_attributions, ortho_word_attributions
     
 
 
@@ -434,14 +473,26 @@ if __name__ == "__main__":
     text = "Local Mayor Launches Initiative to enhance urban public transport."
     target_label = "Politics"
         # Get attributions as (word, score) tuples
-    ame_attributions = attributer.attribute(text, num_datasets=1000, method_name = 'orthogonal')
+    ame_lasso_attributions = attributer.attribute(text, num_datasets=1000, method_name='lasso')
 
     # Print results
-    print("\nAME Attributions:")
-    for word, score in ame_attributions:
+    print("\nAME lasso Attributions:")
+    for word, score in ame_lasso_attributions:
         print(f"{word}: {score:.4f}")
     
-    print("by AME normalized log probability drops by", attributer.compute_log_prob_drop(text, ame_attributions, k=1))
+    print("by AME lasso normalized log probability drops by", attributer.compute_log_prob_drop(text, ame_lasso_attributions, k=1))
+    ame_ortho_attributions = attributer.attribute(text, num_datasets=1000, method_name='orthogonal')
+
+    # Print results
+    print("\nAME Ortho Attributions:", ame_ortho_attributions)
+    for word, score in ame_ortho_attributions:
+        print(f"{word}: {score:.4f}")
+
+    print("by AME ortho normalized log probability drops by", attributer.compute_log_prob_drop(text, ame_ortho_attributions, k=1))
+
+    ame_lasso_attributions, ame_ortho_attributions = attributer.attribute(text, num_datasets=1000, method_name='both')
+    print(ame_lasso_attributions)
+    print(ame_ortho_attributions)
 
     # Compare with SHAP
     shap_attributions = attributer.attribute_shap(text, target_label, nsamples=1000)

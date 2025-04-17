@@ -252,7 +252,8 @@ class PytorchRLearner:
         
     def _to_torch(self, x):
         """Convert numpy array to torch tensor"""
-        return torch.FloatTensor(x)
+        # return torch.FloatTensor(x)
+        return torch.FloatTensor(x.astype(np.float32))
     
     def create_dataloader(self, X, pseudo_outcomes):
         """Create PyTorch DataLoader"""
@@ -319,12 +320,14 @@ class PytorchRLearner:
             optimizer.step()
             
             if (epoch + 1) % 100 == 0:
-                print(f'Epoch [{epoch+1}/{self.n_epochs}], Loss: {loss.item():.4f}')
+                # print(f'Epoch [{epoch+1}/{self.n_epochs}], Loss: {loss.item():.4f}')
         
         # Get CATE estimates for all samples
         self.cate_model.eval()
         with torch.no_grad():
-            uniform_samples = torch.from_numpy(utils.generate_bernoulli_matrix(n_features=X.shape[1], n_samples=1000, p_min=0, p_max=1))
+            # uniform_samples = torch.from_numpy(utils.generate_bernoulli_matrix(n_features=X.shape[1], n_samples=1000, p_min=0, p_max=1))
+            uniform_samples = utils.generate_bernoulli_matrix(n_features=X.shape[1], n_samples=1000, p_min=0, p_max=1)
+            uniform_samples = torch.FloatTensor(uniform_samples.astype(np.float32))
             cate_estimates = self.cate_model(uniform_samples).numpy().flatten()
         
         return {

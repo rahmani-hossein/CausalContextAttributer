@@ -87,12 +87,10 @@ class AttributionBenchmark:
         Returns:
             Dict containing metrics about the probability changes
         """
-        # Get original prediction and probability
         original_label = self.llm_handler.get_predicted_class(text)
         original_metrics = self.llm_handler.get_classification_metrics(text, original_label)
         original_log_prob = original_metrics['normalized_log_prob_given_label']
         
-        # Sort words by absolute attribution score
         sorted_words = sorted(attributions, key=lambda x: abs(x[1]), reverse=True)
         words_to_remove = [word for word, _ in sorted_words[:k]]
         
@@ -101,75 +99,51 @@ class AttributionBenchmark:
         for word in words_to_remove:
             modified_text = re.sub(r'\b' + re.escape(word) + r'\b', '__', modified_text)
         
-        # Get new prediction and probability
+        modified_label = self.llm_handler.get_predicted_class(modified_text)
         modified_metrics = self.llm_handler.get_classification_metrics(modified_text, original_label)
         modified_log_prob = modified_metrics['normalized_log_prob_given_label']
         
-        return original_log_prob - modified_log_prob
-        # return {
-        #     'original_label': original_label,
-        #     'original_log_prob': original_log_prob,
-        #     'modified_log_prob': modified_log_prob,
-        #     'log_prob_drop': original_log_prob - modified_log_prob,
-        #     'modified_label': modified_label,
-        #     'removed_words': words_to_remove
-        # }
+        # return original_log_prob - modified_log_prob
+        return {
+            'original_label': original_label,
+            'original_log_prob': original_log_prob,
+            'modified_log_prob': modified_log_prob,
+            'log_prob_drop': original_log_prob - modified_log_prob,
+            'modified_label': modified_label,
+            'removed_words': words_to_remove
+        }
 
-    def run_comparison(self):
-        for sample in tqdm(self.data,  desc="Processing samples"):
-            original_text = sample['text']
-            original_label = self.index_to_label[sample['label']]
-            
-            self.attributer.attribute(original_text, num_datasets=self.num_attribution_samples)
-
-        
-    def run_benchmark(self, methods: List[str] = ['shap', 'lasso'], k_values: List[int] = [1, 2, 3], **kwargs) -> Dict:
-        """
-        Run attribution benchmark comparing different methods.
-        
-        Args:
-            methods: List of attribution methods to compare
-            k_values: List of k values for top-k word removal
-            **kwargs: Additional arguments passed to attribution methods
-            
-        Returns:
-            Dict containing evaluation metrics for each method and k value
-        """
+    def run_comparison(self, methods: List[str] = ['shap', 'lasso', 'orthogonal'], k_values: List[int] = [1, 2, 3], **kwargs) -> Dict:
         results = {}
-        
         for method in methods:
             results[method] = {k: {
                 'log_prob_drops': [],
-                'label_changes': [],
-                'times': []
+                'label_changes': []
             } for k in k_values}
             
-            # Process each text in dataset
-            for item in tqdm(self.data, desc=f"Evaluating {method}"):
-                text = item['text']
-                true_label = self.class_labels[item['label']]
+        for sample in tqdm(self.data,  desc=f"Evaluating each sample"):
+                original_text = sample['text']
+                # true_label = self.index_to_label[sample['label']]
+                original_label = self.llm_handler.get_predicted_class(original_text)
+                shap_attributions = self.attributer.attribute_shap(sample, original_label, nsamples=self.num_attribution_samples)
                 
-                # Time the attribution computation
-                start_time = time.time()
-                if method == 'shap':
-                    attributions = self.attributer.attribute_shap(text, true_label, **kwargs)
-                else:  # lasso or ate
-                    coeffs = self.attributer.attribute(text, method_name=method, **kwargs)
-                    words = re.findall(r'\b\w+\b', text)
-                    if isinstance(coeffs, (float, int)):
-                        coeffs = [coeffs] * len(words)
-                    attributions = list(zip(words, coeffs))
-                attribution_time = time.time() - start_time
-                
+                lasso_attributions = self.attributer.attribute(original_text, num_datasets=self.num_attribution_samples, method_name='lasso')
+
+                ortho_attributions = self.attributer.attribute(original_text, num_datasets=self.num_attribution_samples, method_name='orthogonal')
                 # Compute metrics for each k
-                for k in k_values:
-                    metrics = self.compute_log_prob_drop(text, attributions, k)
-                    
-                    results[method][k]['log_prob_drops'].append(metrics['log_prob_drop'])
-                    results[method][k]['label_changes'].append(
-                        metrics['original_label'] != metrics['modified_label'])
-                    results[method][k]['times'].append(attribution_time)
-        
+                for method in methods:
+                    if method == 'lasso':
+                        attributions = lasso_attributions
+                    elif method =='shap':
+                        attributions  = shap_attributions
+                    else:
+                        attributions  = ortho_attributions
+                    for k in k_values:
+                        metrics = self.compute_log_prob_drop(original_text, attributions, k)
+                        
+                        results[method][k]['log_prob_drops'].append(metrics['log_prob_drop'])
+                        results[method][k]['label_changes'].append(
+                            metrics['original_label'] != metrics['modified_label'])
         # Compute summary statistics
         summary = {}
         for method in methods:
@@ -177,300 +151,125 @@ class AttributionBenchmark:
             for k in k_values:
                 drops = results[method][k]['log_prob_drops']
                 changes = results[method][k]['label_changes']
-                times = results[method][k]['times']
                 
                 summary[method][k] = {
                     'mean_log_prob_drop': np.mean(drops),
                     'std_log_prob_drop': np.std(drops),
                     'label_change_rate': np.mean(changes),
-                    'mean_attribution_time': np.mean(times)
                 }
         
         return summary
     
-    
-    
 
-    def run_benchmark(self):
-        """Run the full benchmark comparison."""
-        results = {
-            'log_prob_drops': {
-                'shap': {k: [] for k in self.k_values},
-                'ame': {k: [] for k in self.k_values}
-            },
-            'correlations': [],
-            'computation_times': {'shap': [], 'ame': []}
-        }
-        
-        for sample in tqdm(self.dataset, desc="Processing samples"):
-            text = sample['text']
-            label = self.class_labels[sample['label']]  # Convert numeric label to string
-            
-            # Get SHAP attributions
-            shap_attrs = self.attributer.attribute_shap(text, label, nsamples=100)
-            
-            # Get AME attributions (modified to return tuples)
-            ame_coeffs = self.attributer.attribute(text, num_datasets=100)
-            # Convert AME coefficients to (word, score) tuples
-            words = text.split()
-            ame_attrs = list(zip(words, ame_coeffs))
-            
-            # Compute correlation
-            shap_scores = {word: score for word, score in shap_attrs}
-            ame_scores = {word: score for word, score in ame_attrs}
-            common_words = set(shap_scores.keys()) & set(ame_scores.keys())
-            
-            if common_words:
-                shap_values = [shap_scores[w] for w in common_words]
-                ame_values = [ame_scores[w] for w in common_words]
-                correlation, _ = spearmanr(shap_values, ame_values)
-                results['correlations'].append(correlation)
-            
-            # Compute log probability drops for different k
-            for k in self.k_values:
-                shap_drop = self.compute_log_prob_drop(text, shap_attrs, k, label)
-                ame_drop = self.compute_log_prob_drop(text, ame_attrs, k, label)
-                
-                results['log_prob_drops']['shap'][k].append(shap_drop)
-                results['log_prob_drops']['ame'][k].append(ame_drop)
-        
-        return results
-
-    def plot_results(self, results: Dict):
+    def plot_results(self, summary: Dict):
         """Create plots similar to the paper figure."""
+        # Create results directory if it doesn't exist
+        import os
+        from datetime import datetime
+        
+        # Create timestamp for unique filenames
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        results_dir = "attribution_results"
+        os.makedirs(results_dir, exist_ok=True)
+        
         # Plot log probability drops
         plt.figure(figsize=(12, 6))
         
         # Prepare data for plotting
-        x_positions = np.arange(len(self.k_values))
-        width = 0.35
+        methods = list(summary.keys())
+        k_values = list(summary[methods[0]].keys())
+        x_positions = np.arange(len(k_values))
+        width = 0.25
+        
+        # Use a color map for better visualization
+        colors = ['#2ecc71', '#3498db', '#e74c3c']  # Green, Blue, Red
         
         # Plot bars for each method
-        for i, method in enumerate(['shap', 'ame']):
-            means = [np.mean(results['log_prob_drops'][method][k]) for k in self.k_values]
-            stds = [np.std(results['log_prob_drops'][method][k]) for k in self.k_values]
+        for i, (method, color) in enumerate(zip(methods, colors)):
+            means = [summary[method][k]['mean_log_prob_drop'] for k in k_values]
+            stds = [summary[method][k]['std_log_prob_drop'] for k in k_values]
             
             plt.bar(x_positions + i*width, means, width, 
-                   label=method.upper(),
-                   yerr=stds, capsize=5)
+                label=method.upper(),
+                color=color,
+                yerr=stds, capsize=5)
         
-        plt.xlabel('k value')
-        plt.ylabel('Log Probability Drop')
-        plt.title('Top-k Log Probability Drop Comparison')
-        plt.xticks(x_positions + width/2, [f'k={k}' for k in self.k_values])
-        plt.legend()
+        plt.xlabel('Top-k Words Removed', fontsize=12)
+        plt.ylabel('Log Probability Drop', fontsize=12)
+        plt.title('Impact of Removing Top-k Words by Attribution Method', fontsize=14, pad=20)
+        plt.xticks(x_positions + width, [f'k={k}' for k in k_values], fontsize=10)
+        plt.legend(fontsize=10)
+        plt.grid(True, alpha=0.3)
         plt.tight_layout()
-        plt.savefig('log_prob_drops.png')
+        
+        # Save with timestamp
+        filename = os.path.join(results_dir, f'log_prob_drops_{timestamp}.png')
+        plt.savefig(filename, dpi=300, bbox_inches='tight')
         plt.close()
         
-        # Plot correlation distribution
-        plt.figure(figsize=(8, 6))
-        plt.hist(results['correlations'], bins=20)
-        plt.xlabel('Spearman Correlation')
-        plt.ylabel('Count')
-        plt.title('Distribution of SHAP-AME Correlations')
-        plt.savefig('correlations.png')
+        # Plot label change rates
+        plt.figure(figsize=(12, 6))
+        
+        for i, (method, color) in enumerate(zip(methods, colors)):
+            label_changes = [summary[method][k]['label_change_rate'] for k in k_values]
+            
+            plt.bar(x_positions + i*width, label_changes, width,
+                label=method.upper(),
+                color=color)
+        
+        plt.xlabel('Top-k Words Removed', fontsize=12)
+        plt.ylabel('Label Change Rate', fontsize=12)
+        plt.title('Label Change Rate by Attribution Method', fontsize=14, pad=20)
+        plt.xticks(x_positions + width, [f'k={k}' for k in k_values], fontsize=10)
+        plt.legend(fontsize=10)
+        plt.grid(True, alpha=0.3)
+        plt.tight_layout()
+        
+        # Save with timestamp
+        filename = os.path.join(results_dir, f'label_changes_{timestamp}.png')
+        plt.savefig(filename, dpi=300, bbox_inches='tight')
         plt.close()
+        
+        # Save summary statistics to a text file
+        stats_filename = os.path.join(results_dir, f'summary_stats_{timestamp}.txt')
+        with open(stats_filename, 'w') as f:
+            f.write(f"Attribution Analysis Results - {timestamp}\n")
+            f.write("=" * 50 + "\n\n")
+            
+            for method in methods:
+                f.write(f"\n{method.upper()} Results:\n")
+                f.write("-" * 20 + "\n")
+                for k in k_values:
+                    f.write(f"\nTop-{k}:\n")
+                    f.write(f"Log Prob Drop: {summary[method][k]['mean_log_prob_drop']:.3f} ± {summary[method][k]['std_log_prob_drop']:.3f}\n")
+                    f.write(f"Label Change Rate: {summary[method][k]['label_change_rate']:.3f}\n")
+                f.write("\n")
 
 def main():
     # Initialize benchmark
-    benchmark = AGNewsBenchmark(
-        num_samples=100,
-        k_values=[1, 3, 5]
-    )
-    
-    # Run benchmark
-    print("Running benchmark...")
-    results = benchmark.run_benchmark()
-    
-    # Plot results
-    print("Creating plots...")
-    benchmark.plot_results(results)
-    
-    # Print summary statistics
-    print("\nSummary Statistics:")
-    print("Average Spearman correlation:", np.mean(results['correlations']))
-    for k in benchmark.k_values:
-        print(f"\nTop-{k} Log Probability Drop:")
-        print(f"SHAP: {np.mean(results['log_prob_drops']['shap'][k]):.3f} ± {np.std(results['log_prob_drops']['shap'][k]):.3f}")
-        print(f"AME:  {np.mean(results['log_prob_drops']['ame'][k]):.3f} ± {np.std(results['log_prob_drops']['ame'][k]):.3f}")
-
-if __name__ == "__main__":
-    main()
-
-if __name__ == "__main__":
-    attBenchmark = AttributionBenchmark(model_name="meta-llama/Llama-3.2-1B", dataset_name= "ag_news", num_samples=10)
-
-
-
-
-
-
-
-
-
-
-
-
-
-        
-    def compute_top_k_importance(self, attributions: List[Tuple[str, float]], k: int) -> List[str]:
-        """Get top k most important words based on attribution scores."""
-        sorted_attrs = sorted(attributions, key=lambda x: abs(x[1]), reverse=True)
-        return [word for word, _ in sorted_attrs[:k]]
-    
-    def compute_word_drop_impact(
-        self,
-        text: str,
-        top_k_words: List[str],
-        original_label: str
-    ) -> float:
-        """Compute impact of removing top k words on classification probability."""
-        # Remove top k words
-        words = text.split()
-        filtered_words = [w for w in words if w not in top_k_words]
-        filtered_text = " ".join(filtered_words)
-        
-        # Get new classification probability
-        metrics = self.llm_handler.get_classification_metrics(filtered_text, original_label)
-        return metrics['normalized_prob_given_label']
-    
-    
-    def run_comparison(self) -> Dict:
-        """Run the full comparison experiment."""
-        results = {
-            'top_k_importance': {'shap': [], 'ame': []},
-            'word_drop_impact': {'shap': [], 'ame': []},
-            'computation_time': {'shap': [], 'ame': []},
-            'spearman_correlation': [],
-            'stability': {'shap': [], 'ame': []}
-        }
-        
-        for sample in tqdm(self.data, desc="Processing samples"):
-            text = sample['text']
-            true_label = sample['label']
-            
-            # Get predicted label
-            pred_label = self.llm_handler.get_predicted_class(text)
-            
-            # Compute SHAP attributions
-            start_time = time.time()
-            shap_attrs = self.attributer.attribute_shap(
-                text, pred_label, nsamples=self.nsamples_shap
-            )
-            shap_time = time.time() - start_time
-            
-            # Compute AME attributions
-            start_time = time.time()
-            ame_attrs = self.attributer.attribute(text, num_datasets=100)
-            ame_time = time.time() - start_time
-            
-            # Store computation times
-            results['computation_time']['shap'].append(shap_time)
-            results['computation_time']['ame'].append(ame_time)
-            
-            # Compute top-k importance
-            for k in [3, 5, 10]:
-                shap_top_k = self.compute_top_k_importance(shap_attrs, k)
-                ame_top_k = self.compute_top_k_importance(ame_attrs, k)
-                
-                results['top_k_importance']['shap'].append(shap_top_k)
-                results['top_k_importance']['ame'].append(ame_top_k)
-                
-                # Compute word drop impact
-                shap_impact = self.compute_word_drop_impact(text, shap_top_k, pred_label)
-                ame_impact = self.compute_word_drop_impact(text, ame_top_k, pred_label)
-                
-                results['word_drop_impact']['shap'].append(shap_impact)
-                results['word_drop_impact']['ame'].append(ame_impact)
-            
-            # Compute Spearman correlation
-            correlation = self.compute_spearman_correlation(shap_attrs, ame_attrs)
-            results['spearman_correlation'].append(correlation)
-            
-            # Compute stability (run each method twice)
-            shap_attrs2 = self.attributer.attribute_shap(
-                text, pred_label, nsamples=self.nsamples_shap
-            )
-            ame_attrs2 = self.attributer.attribute(text, num_datasets=100)
-            
-            stability_shap = self.compute_spearman_correlation(shap_attrs, shap_attrs2)
-            stability_ame = self.compute_spearman_correlation(ame_attrs, ame_attrs2)
-            
-            results['stability']['shap'].append(stability_shap)
-            results['stability']['ame'].append(stability_ame)
-        
-        return results
-    
-    def visualize_results(self, results: Dict):
-        """Create visualizations of the comparison results."""
-        # 1. Computation Time Comparison
-        plt.figure(figsize=(10, 6))
-        plt.boxplot([
-            results['computation_time']['shap'],
-            results['computation_time']['ame']
-        ], labels=['SHAP', 'AME'])
-        plt.title('Computation Time Comparison')
-        plt.ylabel('Time (seconds)')
-        plt.savefig('computation_time.png')
-        plt.close()
-        
-        # 2. Spearman Correlation Distribution
-        plt.figure(figsize=(10, 6))
-        plt.hist(results['spearman_correlation'], bins=20)
-        plt.title('Distribution of Spearman Correlations')
-        plt.xlabel('Correlation Coefficient')
-        plt.ylabel('Count')
-        plt.savefig('spearman_correlation.png')
-        plt.close()
-        
-        # 3. Stability Comparison
-        plt.figure(figsize=(10, 6))
-        plt.boxplot([
-            results['stability']['shap'],
-            results['stability']['ame']
-        ], labels=['SHAP', 'AME'])
-        plt.title('Attribution Stability Comparison')
-        plt.ylabel('Stability Score')
-        plt.savefig('stability.png')
-        plt.close()
-        
-        # 4. Word Drop Impact Comparison
-        plt.figure(figsize=(10, 6))
-        plt.boxplot([
-            results['word_drop_impact']['shap'],
-            results['word_drop_impact']['ame']
-        ], labels=['SHAP', 'AME'])
-        plt.title('Word Drop Impact Comparison')
-        plt.ylabel('Classification Probability Drop')
-        plt.savefig('word_drop_impact.png')
-        plt.close()
-
-def main():
-    # Initialize experiment
-    experiment = AttributionComparison(
+    benchmark = AttributionBenchmark(
         model_name="meta-llama/Llama-3.2-1B",
-        num_samples=100,
-        nsamples_shap=100
+        dataset_name="ag_news",
+        num_samples=10,
+        num_attribution_samples=1000
     )
     
-    # Run comparison
-    print("Running attribution comparison...")
-    results = experiment.run_comparison()
+    print(benchmark.data)
+    # Run comparison with all three methods
+    print("Running comparison...")
+    summary = benchmark.run_comparison(
+        methods=['shap', 'lasso', 'orthogonal'],
+        k_values=[1, 2, 3]
+    )
     
-    # Visualize results
-    print("Creating visualizations...")
-    experiment.visualize_results(results)
+    # Plot and save results
+    print("Creating and saving plots and statistics...")
+    benchmark.plot_results(summary)
     
-    # Print summary statistics
-    print("\nSummary Statistics:")
-    print(f"Average SHAP computation time: {np.mean(results['computation_time']['shap']):.2f}s")
-    print(f"Average AME computation time: {np.mean(results['computation_time']['ame']):.2f}s")
-    print(f"Average Spearman correlation: {np.mean(results['spearman_correlation']):.3f}")
-    print(f"SHAP stability score: {np.mean(results['stability']['shap']):.3f}")
-    print(f"AME stability score: {np.mean(results['stability']['ame']):.3f}")
-    print(f"Average SHAP word drop impact: {np.mean(results['word_drop_impact']['shap']):.3f}")
-    print(f"Average AME word drop impact: {np.mean(results['word_drop_impact']['ame']):.3f}")
+    print("\nResults have been saved to the 'attribution_results' directory.")
 
 if __name__ == "__main__":
     main()
+    
+# if __name__ == "__main__":
+#     attBenchmark = AttributionBenchmark(model_name="meta-llama/Llama-3.2-1B", dataset_name= "ag_news", num_samples=10)
