@@ -114,19 +114,6 @@ class Attributer:
 
 
                  
-                 
-                        # print("\nResults Summary:")
-                # print("-" * 50)
-                # for treatment, results in all_results.items():
-                #     print(f"\n{treatment}:")
-                #     print(f"ATE: {results['ate']:.3f}")
-                #     print(f"Final Loss: {results['final_loss']:.4f}")
-                #     print(f"CATE std: {np.std(results['cate_estimates']):.3f}")
-
-                #     return results['ate']
-                
-                # return lasso_word_attributions, ortho_word_attributions
-    
 
 
     def plot_logprob_distributions(self, X, y, word_labels=None, save_path='logprob_distributions.png'):
@@ -310,7 +297,63 @@ class Attributer:
         # You can save html_output.data to an HTML file or display in Jupyter
         print("Captum Visualization HTML generated (display in browser/notebook).")
 
-    
+    def attribute_shap2(self, text: str, target_label: str, nsamples: int = 100) -> List[Tuple[str, float]]:
+        """
+        Computes word-level attributions using SHAP's Explainer with custom tokenizer.
+        
+        Args:
+            text: Input text to analyze
+            target_label: Target class label to explain
+            
+        Returns:
+            List of (word, attribution) tuples
+        """
+        print(f"\n--- Running SHAP Attribution for label: {target_label} ---")
+        
+        # Define prediction function
+        def predict_fn(texts, mode = 'prob'):
+            """Wrapper for model predictions."""
+            scores = []
+            for text in texts:
+                metrics = self.LLM_Handler.get_classification_metrics(text, target_label)
+                # Use log probabilities for more stable SHAP values
+                if mode == 'prob':
+                    prob = metrics.get('normalized_prob_given_label')
+                    scores.append(float(prob))
+                elif mode =='log':
+                    log_prob = metrics.get('normalized_log_prob_given_label')
+                    scores.append(float(log_prob))
+            return np.array(scores).reshape(-1, 1)
+        
+        try:
+            masker = shap.maskers.Text(r"\W")  # masker that split on non words. So we have list of words.
+            explainer = shap.Explainer(
+                predict_fn,
+                masker,
+                output_names=[target_label],
+                max_evals=nsamples
+            )
+            
+            # Compute SHAP values
+            shap_values = explainer([text])
+
+            print(f'shapley values{shap_values}')
+            words = shap_values.data[0]
+            attributions = shap_values.values[0]
+            
+            # Match words with their attributions
+            word_attributions = []            
+            for i, (word, attr) in enumerate(zip(words, attributions)):
+                if word.strip():  # Only include non-empty words
+                    word_attributions.append((word, float(attr)))
+            
+            return word_attributions
+            
+        except Exception as e:
+            print(f"Error in SHAP attribution: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            return []
 
     def attribute_shap(self, text: str, target_label: str, nsamples: int = 100) -> List[Tuple[str, float]]:
         """
@@ -495,6 +538,11 @@ if __name__ == "__main__":
     print(ame_ortho_attributions)
 
     # Compare with SHAP
+    shap_attributions2 = attributer.attribute_shap2(text, target_label, nsamples=1000)
+    print("\nSHAP Attributions:")
+    for word, score in shap_attributions2:
+        print(f"{word}: {score:.4f}")
+
     shap_attributions = attributer.attribute_shap(text, target_label, nsamples=1000)
     print("\nSHAP Attributions:")
     for word, score in shap_attributions:

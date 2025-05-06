@@ -125,6 +125,7 @@ class AttributionBenchmark:
                 original_text = sample['text']
                 # true_label = self.index_to_label[sample['label']]
                 original_label = self.llm_handler.get_predicted_class(original_text)
+                print(f"Input text type: {type(original_text)}, value: {original_text}")
                 shap_attributions = self.attributer.attribute_shap(sample, original_label, nsamples=self.num_attribution_samples)
                 
                 lasso_attributions = self.attributer.attribute(original_text, num_datasets=self.num_attribution_samples, method_name='lasso')
