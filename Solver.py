@@ -18,6 +18,7 @@ from sklearn.metrics import mean_squared_error, r2_score
 import warnings
 warnings.filterwarnings('ignore')
 import utils
+from econml.dml import NonParamDML
 
 
 class BASE_AME_Solver(ABC):
@@ -30,7 +31,8 @@ class BASE_AME_Solver(ABC):
     """
 
     @abstractmethod
-    def fit(self, X, y): ...
+    def fit(self, masks: NDArray, outputs: NDArray, num_output_tokens: int) -> Tuple[NDArray, NDArray]:
+        ...
 
 
 
@@ -319,16 +321,15 @@ class PytorchRLearner:
             loss.backward()
             optimizer.step()
             
-            if (epoch + 1) % 100 == 0:
-                # print(f'Epoch [{epoch+1}/{self.n_epochs}], Loss: {loss.item():.4f}')
-        
-        # Get CATE estimates for all samples
+            if (epoch + 1) % 1000 == 0:
+                print(f'Epoch [{epoch+1}/{self.n_epochs}], Loss: {loss.item():.4f}')
+
         self.cate_model.eval()
         with torch.no_grad():
             # uniform_samples = torch.from_numpy(utils.generate_bernoulli_matrix(n_features=X.shape[1], n_samples=1000, p_min=0, p_max=1))
             uniform_samples = utils.generate_bernoulli_matrix(n_features=X.shape[1], n_samples=1000, p_min=0, p_max=1)
             uniform_samples = torch.FloatTensor(uniform_samples.astype(np.float32))
-            cate_estimates = self.cate_model(uniform_samples).numpy().flatten()
+            cate_estimates = self.cate_model(uniform_samples).cpu().numpy().flatten()
         
         return {
             'cate_estimates': cate_estimates,
@@ -339,31 +340,50 @@ class PytorchRLearner:
 def estimate_all_treatments(X, y):
     """
     Estimate CATE for each column in X sequentially as treatment
+    Also compare with EconML NonParamDML for each treatment.
     """
     n_treatments = X.shape[1]
     results = {}
-    
+    econml_results = {}
     for i in range(n_treatments):
-        print(f"\nEstimating CATE for treatment {i}")
+        print(f"\nEstimating CATE for treatment {i} (PyTorch R-learner)")
         # Extract current treatment and remaining features
         T = X[:, i]
         X_reduced = np.delete(X, i, axis=1)
-        
-        # Initialize and fit R-learner
+        # PyTorch R-learner
         rlearner = PytorchRLearner(
             learning_rate=0.01,
             n_epochs=2000,
             batch_size=32
         )
+        print(f'Treatment feature {i} shape is {T.shape} for MYorthogonal method.')
         treatment_results = rlearner.estimate_cate(X_reduced, T, y)
-        
+
         results[f'treatment_{i}'] = {
             'ate': treatment_results['ate'],
             'cate_estimates': treatment_results['cate_estimates'],
             'final_loss': treatment_results['final_loss']
         }
-    
-    return results
+        # EconML DML
+        print(f"Estimating CATE for treatment {i} (EconML NonParamDML)")
+        econml_learner = EconMLDMLLearner()
+        print(f'X_reduced shape is {X_reduced.shape}')
+        print(f'Treatmentfeature {i} shape is {T.shape}')
+
+        econml_treatment_results = econml_learner.estimate_cate( X=X_reduced, T=T, y=y)
+        econml_results[f'treatment_{i}'] = {
+            'ate': econml_treatment_results['ate'],
+            'cate_estimates': econml_treatment_results['cate_estimates'],
+            'final_loss': econml_treatment_results['final_loss']
+        }
+        # Print comparison
+        print(f"PyTorch R-learner ATE: {treatment_results['ate']:.3f}")
+        print(f"EconML DML ATE: {econml_treatment_results['ate']:.3f}")
+        print(f"PyTorch R-learner CATE std: {np.std(treatment_results['cate_estimates']):.3f}")
+        print(f"EconML DML CATE std: {np.std(econml_treatment_results['cate_estimates']):.3f}")
+        print(f"PyTorch R-learner Final Loss: {treatment_results['final_loss']}")
+        print(f"EconML DML Final Loss: {econml_treatment_results['final_loss']}")
+    return {'pytorch': results, 'econml': econml_results}
 
 # # Example usage:
 # if __name__ == "__main__":
@@ -382,3 +402,68 @@ def estimate_all_treatments(X, y):
 #         print(f"ATE: {results['ate']:.3f}")
 #         print(f"Final Loss: {results['final_loss']:.4f}")
 #         print(f"CATE std: {np.std(results['cate_estimates']):.3f}")
+
+class EconMLDMLLearner:
+    def __init__(self, n_estimators=100, max_depth=3, random_state=123):
+        self.n_estimators = n_estimators
+        self.max_depth = max_depth
+        self.random_state = random_state
+
+    def estimate_cate(self, X, T, y):
+        n_train = X.shape[0]
+        # Use GradientBoostingRegressor for all models as in your example
+        T = (T > 0.5).astype(np.int32)  # Convert to binary (0 or 1)
+        print(f"T shape: {T.shape}, Unique values: {np.unique(T)}")  # Debug print
+        model_t = GradientBoostingClassifier(
+            n_estimators=self.n_estimators,
+            max_depth=self.max_depth,
+            min_samples_leaf=max(1, int(n_train/100)),
+            random_state=self.random_state
+        )
+        model_y = GradientBoostingRegressor(
+            n_estimators=self.n_estimators,
+            max_depth=self.max_depth,
+            min_samples_leaf=max(1, int(n_train/100)),
+            random_state=self.random_state
+        )
+        model_final = GradientBoostingRegressor(
+            n_estimators=self.n_estimators,
+            max_depth=self.max_depth,
+            min_samples_leaf=max(1, int(n_train/100)),
+            random_state=self.random_state
+        )
+        dml = NonParamDML(
+            model_t=model_t,
+            model_y=model_y,
+            model_final=model_final,
+            discrete_treatment=True,
+            random_state=self.random_state
+        )
+        dml.fit(y, T, X=X, W=None)
+        # For comparison, generate CATE estimates on a uniform sample as in PytorchRLearner
+        uniform_samples = utils.generate_bernoulli_matrix(n_features=X.shape[1], n_samples=1000, p_min=0, p_max=1)
+        cate_estimates = dml.effect(uniform_samples)
+        return {
+            'cate_estimates': cate_estimates,
+            'ate': np.mean(cate_estimates),
+            'final_loss': None  # Not directly available from econml
+        }
+
+def estimate_all_treatments_econml(X, y):
+    """
+    Estimate CATE for each column in X sequentially as treatment using EconML NonParamDML
+    """
+    n_treatments = X.shape[1]
+    results = {}
+    for i in range(n_treatments):
+        print(f"\n[EconML] Estimating CATE for treatment {i}")
+        T = X[:, i]
+        X_reduced = np.delete(X, i, axis=1)
+        learner = EconMLDMLLearner()
+        treatment_results = learner.estimate_cate(X_reduced, T, y)
+        results[f'treatment_{i}'] = {
+            'ate': treatment_results['ate'],
+            'cate_estimates': treatment_results['cate_estimates'],
+            'final_loss': treatment_results['final_loss']
+        }
+    return results

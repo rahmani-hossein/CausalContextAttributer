@@ -33,26 +33,50 @@ class Attributer:
             self.LLM_Handler = LLM_Handler(class_labels, hf_auth_token, "meta-llama/Llama-3.2-1B")
 
         
-    # def ame_attributer(X, y, partition, coef_scaling, method = 'lasso'):
-    #     if method =='lasso':
-    #         lasso_solver = Solver.LassoSolver(coef_scaling)
-    #         coefficients = lasso_solver.fit(X, y)
-    #         lasso_word_attributions = list(zip(partition.parts, coefficients))     
-    #         print("Lasso Coefficients as (word, score) pairs:", lasso_word_attributions)
-    #         return lasso_word_attributions
+ 
+
+    def attribute_ame(self, original_prompt, num_datasets = 2000, split_by = "word", mode = "classification", save_data = False):
+        """
+        Compute attributions and return as (word, score) tuples.
         
-    #     elif method =='ortho':
-    #         all_results = Solver.estimate_all_treatments(X, y)
-    #         ortho_word_attributions = []
-    #         for i, word in enumerate(partition.parts):
-    #             treatment_key = f'treatment_{i}'
-    #             if treatment_key in all_results:
-    #                 ate_score = all_results[treatment_key]['ate']
-    #                 ortho_word_attributions.append((word, ate_score))
+        Args:
+            original_prompt: Input text to analyze
+            num_datasets: Number of samples for AME
+            split_by: How to split text ("word" or "sentence")
+            mode: Type of task ("classification")
+            method_name: Attribution method ('lasso' or other)
             
-    #         return ortho_word_attributions
-
-
+        Returns:
+            List[Tuple[str, float]]: List of (word, attribution_score) tuples
+        """
+        if mode == "classification":
+            original_label =self.LLM_Handler.get_predicted_class(original_prompt)
+            prompt_gen = context_processor.EfficientPromptGenerator(LLM_handler=self.LLM_Handler, prompt=original_prompt, num_datasets=num_datasets)
+            X, partition = prompt_gen.create_X(split_by=split_by, mode= "1/p featurization")
+            y, y_lognormalized, outputs = prompt_gen.create_y(prompt_gen.sample_prompts, original_label=original_label)
+            if save_data:
+                np.save(f'CausalContextAttributer/data/correct_X_{original_prompt[:5]}continue.npy', X)
+                np.save(f'CausalContextAttributer/data/corrrect_y_{original_prompt[:5]}continue.npy', y_lognormalized)
+            
+            lasso_solver = Solver.LassoSolver(coef_scaling= prompt_gen.coef_scaling())
+            coefficients = lasso_solver.fit(X, y_lognormalized)
+            lasso_source_attributions = list(zip(partition.parts, coefficients))
+            
+            print("Lasso Coefficients as (source, score) pairs:", lasso_source_attributions)
+            
+            
+            print('we are doing the orthogonal method')
+            
+            all_results = Solver.estimate_all_treatments(X, y_lognormalized)
+            ortho_result = all_results['econml']
+            ortho_source_attributions = []
+            for i, source in enumerate(partition.parts):
+                treatment_key = f'treatment_{i}'
+                if treatment_key in ortho_result:
+                    ate_score = ortho_result[treatment_key]['ate']
+                    ortho_source_attributions.append((source, ate_score))            
+             
+            return (lasso_source_attributions, ortho_source_attributions)
 
 
     def attribute(self, original_prompt, num_datasets = 2000, split_by = "word", mode = "classification", method_name = 'lasso', save_data = False):
@@ -297,7 +321,7 @@ class Attributer:
         # You can save html_output.data to an HTML file or display in Jupyter
         print("Captum Visualization HTML generated (display in browser/notebook).")
 
-    def attribute_shap2(self, text: str, target_label: str, nsamples: int = 100) -> List[Tuple[str, float]]:
+    def attribute_shap(self, text: str, target_label: str, nsamples: int = 100) -> List[Tuple[str, float]]:
         """
         Computes word-level attributions using SHAP's Explainer with custom tokenizer.
         
@@ -309,7 +333,7 @@ class Attributer:
             List of (word, attribution) tuples
         """
         print(f"\n--- Running SHAP Attribution for label: {target_label} ---")
-        
+
         # Define prediction function
         def predict_fn(texts, mode = 'prob'):
             """Wrapper for model predictions."""
@@ -337,110 +361,17 @@ class Attributer:
             # Compute SHAP values
             shap_values = explainer([text])
 
-            print(f'shapley values{shap_values}')
+            # print(f'shapley values{shap_values}')
             words = shap_values.data[0]
             attributions = shap_values.values[0]
             
             # Match words with their attributions
-            word_attributions = []            
-            for i, (word, attr) in enumerate(zip(words, attributions)):
-                if word.strip():  # Only include non-empty words
-                    word_attributions.append((word, float(attr)))
-            
-            return word_attributions
-            
-        except Exception as e:
-            print(f"Error in SHAP attribution: {str(e)}")
-            import traceback
-            traceback.print_exc()
-            return []
+            word_attributions = []
+            for word, attr in zip(words, attributions):
+                clean = self.clean_word(word)
+                if clean:  # Only include non-empty
+                    word_attributions.append((clean, float(attr)))
 
-    def attribute_shap(self, text: str, target_label: str, nsamples: int = 100) -> List[Tuple[str, float]]:
-        """
-        Computes word-level attributions using SHAP's Explainer with custom tokenizer.
-        
-        Args:
-            text: Input text to analyze
-            target_label: Target class label to explain
-            
-        Returns:
-            List of (word, attribution) tuples
-        """
-        print(f"\n--- Running SHAP Attribution for label: {target_label} ---")
-        
-        # Define custom tokenizer function
-        def custom_tokenizer(s, return_offsets_mapping=True):
-            """Custom tokenizer that splits on word boundaries."""
-            import re
-            pos = 0
-            offset_ranges = []
-            input_ids = []
-            
-            # Find all word boundaries
-            for m in re.finditer(r'\b\w+\b', s):
-                start, end = m.span(0)
-                # Add any non-word characters before this word
-                if start > pos:
-                    offset_ranges.append((pos, start))
-                    input_ids.append(s[pos:start])
-                # Add the word
-                offset_ranges.append((start, end))
-                input_ids.append(s[start:end])
-                pos = end
-                
-            # Add any remaining text
-            if pos != len(s):
-                offset_ranges.append((pos, len(s)))
-                input_ids.append(s[pos:])
-                
-            out = {
-                "input_ids": input_ids,
-            }
-            if return_offsets_mapping:
-                out["offset_mapping"] = offset_ranges
-            return out
-        
-        # Define prediction function
-        def predict_fn(texts, mode = 'prob'):
-            """Wrapper for model predictions."""
-            scores = []
-            for text in texts:
-                metrics = self.LLM_Handler.get_classification_metrics(text, target_label)
-                # Use log probabilities for more stable SHAP values
-                if mode == 'prob':
-                    prob = metrics.get('normalized_prob_given_label')
-                    scores.append(float(prob))
-                elif mode =='log':
-                    log_prob = metrics.get('normalized_log_prob_given_label')
-                    scores.append(float(log_prob))
-            return np.array(scores).reshape(-1, 1)
-        
-        try:
-            # Create masker with custom tokenizer
-            masker = shap.maskers.Text(custom_tokenizer)
-            
-            # Create explainer
-            explainer = shap.Explainer(
-                predict_fn,
-                masker,
-                output_names=[target_label],
-                max_evals=nsamples
-            )
-            
-            # Compute SHAP values
-            shap_values = explainer([text])
-            
-            # Extract word attributions
-            words = re.findall(r'\b\w+\b', text)
-            attributions = shap_values.values[0]
-            
-            # Match words with their attributions
-            word_attributions = []            
-            for i, (word, attr) in enumerate(zip(words, attributions)):
-                if word.strip():  # Only include non-empty words
-                    word_attributions.append((word, float(attr)))
-            
-            # print(f"SHAP Attributions: {word_attributions}")
             return word_attributions
             
         except Exception as e:
@@ -448,7 +379,7 @@ class Attributer:
             import traceback
             traceback.print_exc()
             return []
-        
+    
     def compute_spearman_correlation(
         self,
         shap_attrs: List[Tuple[str, float]],
@@ -461,11 +392,11 @@ class Attributer:
         
         # Get common words
         common_words = set(shap_scores.keys()) & set(ame_scores.keys())
+        # print(f'common words are: {common_words}')
         
         # Create score arrays
         shap_array = [shap_scores[word] for word in common_words]
         ame_array = [ame_scores[word] for word in common_words]
-        
         # Compute correlation
         correlation, _ = spearmanr(shap_array, ame_array)
         return correlation
@@ -504,6 +435,10 @@ class Attributer:
         
         return original_log_prob - modified_log_prob
 
+    def clean_word(self, word):
+        # Remove leading/trailing whitespace and punctuation
+        return re.sub(r"^\W+|\W+$", "", word).strip()
+
 
 
 if __name__ == "__main__":
@@ -516,7 +451,15 @@ if __name__ == "__main__":
     text = "Local Mayor Launches Initiative to enhance urban public transport."
     target_label = "Politics"
         # Get attributions as (word, score) tuples
-    ame_lasso_attributions = attributer.attribute(text, num_datasets=1000, method_name='lasso')
+    # ame_lasso_attributions = attributer.attribute(text, num_datasets=1000, method_name='lasso')
+
+    # # Print results
+    # print("\nAME lasso Attributions:")
+    # for word, score in ame_lasso_attributions:
+    #     print(f"{word}: {score:.4f}")
+    
+    # print("by AME lasso normalized log probability drops by", attributer.compute_log_prob_drop(text, ame_lasso_attributions, k=1))
+    ame_lasso_attributions, ame_ortho_attributions = attributer.attribute_ame(text, num_datasets=1000)
 
     # Print results
     print("\nAME lasso Attributions:")
@@ -524,32 +467,21 @@ if __name__ == "__main__":
         print(f"{word}: {score:.4f}")
     
     print("by AME lasso normalized log probability drops by", attributer.compute_log_prob_drop(text, ame_lasso_attributions, k=1))
-    ame_ortho_attributions = attributer.attribute(text, num_datasets=1000, method_name='orthogonal')
 
-    # Print results
-    print("\nAME Ortho Attributions:", ame_ortho_attributions)
+    print("\nAME orthogonal Attributions:")
     for word, score in ame_ortho_attributions:
         print(f"{word}: {score:.4f}")
+    
+    print("by AME Orthogonal normalized log probability drops by", attributer.compute_log_prob_drop(text, ame_ortho_attributions, k=1))
 
-    print("by AME ortho normalized log probability drops by", attributer.compute_log_prob_drop(text, ame_ortho_attributions, k=1))
-
-    ame_lasso_attributions, ame_ortho_attributions = attributer.attribute(text, num_datasets=1000, method_name='both')
-    print(ame_lasso_attributions)
-    print(ame_ortho_attributions)
-
-    # Compare with SHAP
-    shap_attributions2 = attributer.attribute_shap2(text, target_label, nsamples=1000)
-    print("\nSHAP Attributions:")
-    for word, score in shap_attributions2:
-        print(f"{word}: {score:.4f}")
+    print(f'the spaersman correlation between lasso and orthogonal {attributer.compute_spearman_correlation(shap_attrs=ame_ortho_attributions, ame_attrs=ame_lasso_attributions)}')
 
     shap_attributions = attributer.attribute_shap(text, target_label, nsamples=1000)
     print("\nSHAP Attributions:")
     for word, score in shap_attributions:
         print(f"{word}: {score:.4f}")
-    
 
-    # ame_attributions = attributer.attribute(text)
+    print(f'the spaersman correlation between shap and ame_lasso{attributer.compute_spearman_correlation(shap_attrs=shap_attributions, ame_attrs=ame_lasso_attributions)}')
 
     
 # if __name__ == "__main__":
