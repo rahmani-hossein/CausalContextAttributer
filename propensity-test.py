@@ -100,8 +100,8 @@ def estimate_propensity_scores(X, treatment):
     return results
 
 # Load and prepare your data
-X_full = np.load("data/X_M_max.npy")
-y_full = np.load("data/y_M_max.npy")
+X_full = np.load("CausalContextAttributer/data/X_M_max.npy")
+y_full = np.load("CausalContextAttributer/data/y_M_max.npy")
 m = X_full.shape[0]
 X = X_full [0:m//2,:]
 source_idx = 0
