@@ -19,6 +19,10 @@ from captum.attr._utils.visualization import format_word_importances # For bette
 import matplotlib
 # 1) If you ever use any matplotlib plots (e.g. bar charts), force Agg on headless:
 matplotlib.use("Agg")  # non‑GUI backend :contentReference[oaicite:0]{index=0}
+import nltk
+from spacy.lang.en import English
+from typing import Callable, List, Tuple, Dict, Union
+
 
 
 class Attributer:
@@ -63,10 +67,7 @@ class Attributer:
             lasso_source_attributions = list(zip(partition.parts, coefficients))
             
             print("Lasso Coefficients as (source, score) pairs:", lasso_source_attributions)
-            
-            
-            print('we are doing the orthogonal method')
-            
+
             all_results = Solver.estimate_all_treatments(X, y_lognormalized)
             ortho_result = all_results['econml']
             ortho_source_attributions = []
@@ -195,148 +196,26 @@ class Attributer:
         print(f"Plot saved to {save_path}")
         plt.close()  # Close the figure to free memory
 
-    
-    # --- Integrated Gradients Attribution Method ---
-    def attribute_integrated_gradients(self, text: str, target_label: str) -> List[Tuple[str, float]]:
-        """Computes word-level attributions using Integrated Gradients."""
-        print(f"\n--- Running Integrated Gradients Attribution for label: {target_label} ---")
-
-        # 1. Get the target token ID for the predicted class
-        target_token_id = self.LLM_Handler.class_tokens.get(target_label)
-        if target_token_id is None:
-            print(f"Error: Could not find token ID for label '{target_label}'")
-            return []
-        print(f"Target Label: {target_label}, Target Token ID: {target_token_id}")
-
-        # 2. Define the forward function for Captum
-        #    Input: token embeddings (or input_ids)
-        #    Output: Logit of the target class token *before* softmax
-        def model_forward(inputs_embeds):
-            # Construct the prompt text around the input
-            # This is tricky with embeddings. A common approach is to get logits directly from input_ids.
-            # Let's redefine to work with input_ids first, then adapt if needed for LayerIG on embeddings.
-
-            # Alternate forward func using input_ids (simpler for basic IG)
-            # Assumes 'inputs' are input_ids
-            input_ids = inputs_embeds # Rename for clarity if passing IDs
-
-            # We need the full prompt structure for the model
-            # This requires modifying the input_ids to include the prompt template
-            # This is complex with IG baselines. Let's stick to LayerIG on embeddings.
-
-            # Revert to Embeddings - Define forward for LayerIntegratedGradients
-            # inputs_embeds: embeddings of the input text tokens
-            # We need the full sequence including prompt template tokens for the model context
-
-            # Get embeddings for the prompt template
-            prompt_prefix = f"Classify this headline: "
-            prefix_tokens = self.tokenizer(prompt_prefix, return_tensors="pt", add_special_tokens=False).input_ids.to(self.device)
-            prefix_embeds = self.model.get_input_embeddings()(prefix_tokens) # Shape: (1, seq_len_prefix, embed_dim)
-
-            prompt_suffix = ". The category is: "
-            suffix_tokens = self.tokenizer(prompt_suffix, return_tensors="pt", add_special_tokens=False).input_ids.to(self.device)
-            suffix_embeds = self.model.get_input_embeddings()(suffix_tokens) # Shape: (1, seq_len_suffix, embed_dim)
-
-            # Combine embeddings: prefix + input_text + suffix
-            # inputs_embeds has shape (batch_size=1, seq_len_input, embed_dim)
-            full_embeds = torch.cat([prefix_embeds, inputs_embeds, suffix_embeds], dim=1)
-
-            # Pass combined embeddings through the model
-            outputs = self.model(inputs_embeds=full_embeds)
-            logits = outputs.logits # Shape: (batch, seq_len_full, vocab_size)
-            # We need the logits for the *last* token position, which predicts the category
-            last_token_logits = logits[:, -1, :] # Shape: (batch, vocab_size)
-            return last_token_logits
-
-
-        # 3. Prepare inputs and baseline for IG
-        # Tokenize the input text *only*
-        inputs = self.tokenizer(text, return_tensors="pt", add_special_tokens=False)
-        input_ids = inputs["input_ids"].to(self.device)
-        attention_mask = inputs["attention_mask"].to(self.device) # Needed if model uses it
-
-        # Get input embeddings
-        input_embeddings = self.model.get_input_embeddings()(input_ids) # Shape: (1, seq_len, embed_dim)
-
-        # Baseline: embedding of padding tokens or zeros
-        baseline_token_id = self.tokenizer.pad_token_id if self.tokenizer.pad_token_id is not None else 0
-        baseline_ids = torch.full_like(input_ids, baseline_token_id)
-        baseline_embeddings = self.model.get_input_embeddings()(baseline_ids)
-
-        # 4. Initialize Integrated Gradients
-        # Use LayerIntegratedGradients with the embedding layer
-        lig = LayerIntegratedGradients(model_forward, self.model.get_input_embeddings())
-
-        # 5. Compute attributions
-        try:
-            attributions_ig = lig.attribute(inputs_embeds=input_embeddings,
-                                            baselines=baseline_embeddings,
-                                            target=target_token_id, # Target is the class token ID
-                                            n_steps=50, # Number of steps for integration
-                                            internal_batch_size=1) # Adjust if needed for memory
-        except Exception as e:
-            print(f"Error during Integrated Gradients calculation: {e}")
-            return []
-
-        # Attributions have shape (1, seq_len, embed_dim). Sum across embedding dimension.
-        attributions_sum = attributions_ig.sum(dim=-1).squeeze(0)
-        attributions_norm = attributions_sum / torch.norm(attributions_sum) # Normalize
-        attributions_np = attributions_norm.cpu().detach().numpy()
-
-        # 6. Map token attributions back to words
-        tokens = self.tokenizer.convert_ids_to_tokens(input_ids[0])
-        # Simple word splitting for mapping (same as SHAP)
-        words = re.findall(r'\b\w+\b', text.lower())
-        # Use token offsets for more robust mapping if available and needed
-        # For now, use a basic aggregation or just show token attributions
-        token_word_mapping = list(zip(tokens, attributions_np))
-
-        # Try to aggregate to word level (basic sum)
-        # Need offsets for proper aggregation. This is a placeholder.
-        # word_attributions = self._aggregate_token_to_word_attributions(tokens, attributions_np, text) # Need a helper
-        # Using token attributions directly for now
-        print(f"Integrated Gradients Attributions (Token Level): {token_word_mapping}")
-
-        # Optional: Visualize using Captum's tools
-        # self.visualize_attributions(attributions_norm, tokens, target_label, text)
-
-        print("--- Finished Integrated Gradients ---")
-        # Return token-level attributions for now, word-level needs careful mapping
-        return token_word_mapping # Or word_attributions if aggregation is implemented
-
-    from captum.attr import visualization as viz
-
-    def visualize_attributions(self, attributions, tokens, label, text):
-        """Helper to visualize Captum attributions."""
-        vis_data_records = [viz.VisualizationDataRecord(
-                                attributions,
-                                0, # pred_prob (dummy)
-                                label, # predicted_class
-                                label, # true_class (use predicted for viz)
-                                "attributions", # attribution type
-                                attributions.sum(), # attribution score
-                                tokens, # raw_input_ids
-                                1)] # convergence score (dummy)
-        html_output = viz.visualize_text(vis_data_records)
-        # You can save html_output.data to an HTML file or display in Jupyter
-        print("Captum Visualization HTML generated (display in browser/notebook).")
-
-    def attribute_shap(self, text: str, target_label: str, nsamples: int = 100) -> List[Tuple[str, float]]:
+    def attribute_shap(self, text: str, target_label: str, nsamples: int = 100, split_by: str = "word") -> List[Tuple[str, float]]:
         """
-        Computes word-level attributions using SHAP's Explainer with custom tokenizer.
+        Computes source (word or sentence) attributions using SHAP's Explainer with custom tokenizer.
         
         Args:
             text: Input text to analyze
             target_label: Target class label to explain
-            
+            nsamples: Number of SHAP samples
+            split_by: 'word' (default) to split on words, 'sentence' to split on sentences
+                - For sentence-wise attribution, use split_by='sentence'.
+                - For word-wise attribution, use split_by='word'.
         Returns:
-            List of (word, attribution) tuples
+            List of (word or sentence, attribution) tuples
         """
-        print(f"\n--- Running SHAP Attribution for label: {target_label} ---")
+        print(f"\n--- Running SHAP Attribution for label: {target_label} (split_by={split_by}) ---")
 
         # Define prediction function
         def predict_fn(texts, mode = 'prob'):
             """Wrapper for model predictions."""
+            print(texts)
             scores = []
             for text in texts:
                 metrics = self.LLM_Handler.get_classification_metrics(text, target_label)
@@ -349,8 +228,16 @@ class Attributer:
                     scores.append(float(log_prob))
             return np.array(scores).reshape(-1, 1)
         
+        # Use regex for SHAP splitting
+        if split_by == 'word':
+            masker_regex = r"\W"  # split on non-words (word-level)
+        elif split_by == 'sentence':
+            masker_regex = r"(?<=[.!?])\s+|(?<=[.!?])$"  # split on sentence boundaries
+        else:
+            raise ValueError(f"split_by must be 'word' or 'sentence', got {split_by}")
+
         try:
-            masker = shap.maskers.Text(r"\W")  # masker that split on non words. So we have list of words.
+            masker = shap.maskers.Text(masker_regex)
             explainer = shap.Explainer(
                 predict_fn,
                 masker,
@@ -361,14 +248,13 @@ class Attributer:
             # Compute SHAP values
             shap_values = explainer([text])
 
-            # print(f'shapley values{shap_values}')
-            words = shap_values.data[0]
+            sources = shap_values.data[0]
             attributions = shap_values.values[0]
             
-            # Match words with their attributions
+            # Match sources (words/sentences) with their attributions
             word_attributions = []
-            for word, attr in zip(words, attributions):
-                clean = self.clean_word(word)
+            for source, attr in zip(sources, attributions):
+                clean = self.clean_word(source)
                 if clean:  # Only include non-empty
                     word_attributions.append((clean, float(attr)))
 
@@ -387,12 +273,12 @@ class Attributer:
     ) -> float:
         """Compute Spearman correlation between SHAP and AME attributions."""
         # Create word to score mapping
-        shap_scores = {word: score for word, score in shap_attrs}
-        ame_scores = {word: score for word, score in ame_attrs}
+        shap_scores = {source: score for source, score in shap_attrs}
+        ame_scores = {source: score for source, score in ame_attrs}
         
         # Get common words
         common_words = set(shap_scores.keys()) & set(ame_scores.keys())
-        # print(f'common words are: {common_words}')
+        print(f'common words are: {common_words}')
         
         # Create score arrays
         shap_array = [shap_scores[word] for word in common_words]
@@ -440,18 +326,187 @@ class Attributer:
         return re.sub(r"^\W+|\W+$", "", word).strip()
 
 
+    def get_split_function(self, split_by: str) -> Callable[[str, bool], Dict[str, Union[List[str], List[Tuple[int, int]]]]]:
+        """
+        Returns a splitter function that tokenizes text into words or sentences for SHAP's maskers.Text.
+        For sentences: uses NLTK's sentence tokenizer.
+        For words: uses NLTK's word_tokenize.
+        
+        Args:
+            split_by (str): Tokenization mode, either 'word' or 'sentence'.
+        
+        Returns:
+            Callable[[str, bool], Dict[str, Union[List[str], List[Tuple[int, int]]]]]:
+                A function that takes a text string and a boolean (return_offsets_mapping).
+                Returns a dict with 'input_ids' (list of tokens) and, if return_offsets_mapping=True,
+                'offset_mapping' (list of (start, end) tuples).
+        
+        Raises:
+            ValueError: If split_by is not 'word' or 'sentence'.
+        """
+        # nltk.download('punkt', quiet=True)
+        # nltk.download('punkt_tab', quiet=True)
+        
+        if split_by == "sentence":
+            def splitter(text: str, return_offsets_mapping: bool = True) -> Dict[str, Union[List[str], List[Tuple[int, int]]]]:
+                tokenizer = nltk.data.load('tokenizers/punkt/english.pickle')
+                spans = list(tokenizer.span_tokenize(text))
+                input_ids = [text[start:end] for start, end in spans]
+                out = {"input_ids": input_ids}
+                if return_offsets_mapping:
+                    out["offset_mapping"] = spans
+                return out
+        elif split_by == "word":
+            def splitter(text: str, return_offsets_mapping: bool = True) -> Dict[str, Union[List[str], List[Tuple[int, int]]]]:
+                input_ids = nltk.word_tokenize(text)
+                offset_ranges = []
+                pos = 0
+                for token in input_ids:
+                    start = text.find(token, pos)
+                    if start == -1:  # Handle rare cases where token isn't found
+                        start = pos
+                    end = start + len(token)
+                    offset_ranges.append((start, end))
+                    pos = end
+                out = {"input_ids": input_ids}
+                if return_offsets_mapping:
+                    out["offset_mapping"] = offset_ranges
+                # Optional: Filter punctuation to match regex r'\b\w+\b' behavior
+                # if not return_offsets_mapping:
+                #     out["input_ids"] = [t for t in input_ids if re.match(r'\w+', t)]
+                return out
+        else:
+            raise ValueError("split_by must be 'word' or 'sentence'")
+        return splitter
+
+
+
+    # def get_split_function(self, split_by: str):
+    #     """
+    #     Returns a splitter function that tokenizes text into words or sentences.
+    #     For sentences: uses NLTK's sentence tokenizer.
+    #     For words: uses regex pattern r'\b\w+\b' to match AME's approach.
+        
+    #     Args:
+    #         split_by (str): Tokenization mode, either 'word' or 'sentence'.
+        
+    #     Returns:
+    #         Callable[[str, bool], Union[List[str], Dict[str, Union[List[str], List[Tuple[int, int]]]]]]:
+    #             A function that takes a text string and a boolean (return_offsets_mapping).
+    #             - If return_offsets_mapping=False, returns a list of tokens (for AME).
+    #             - If return_offsets_mapping=True, returns a dict with 'input_ids' (list of tokens)
+    #             and 'offset_mapping' (list of (start, end) tuples) for SHAP.
+        
+    #     Raises:
+    #         ValueError: If split_by is not 'word' or 'sentence'.
+    #     """    
+    #     if split_by == "sentence":
+    #         def splitter(text: str, return_offsets_mapping: bool = True):
+    #             tokenizer = nltk.data.load('tokenizers/punkt/english.pickle')
+    #             spans = list(tokenizer.span_tokenize(text))
+    #             input_ids = [text[start:end] for start, end in spans]
+    #             out = {"input_ids": input_ids}
+    #             if return_offsets_mapping:
+    #                 out["offset_mapping"] = spans
+    #             return out
+    #     elif split_by == "word":
+    #         def splitter(text: str, return_offsets_mapping: bool = True):
+    #             pattern = re.compile(r'\b\w+\b')
+    #             input_ids = []
+    #             offset_ranges = []
+    #             for match in pattern.finditer(text):
+    #                 start, end = match.span()
+    #                 input_ids.append(text[start:end])
+    #                 offset_ranges.append((start, end))
+    #             out = {"input_ids": input_ids}
+    #             if return_offsets_mapping:
+    #                 out["offset_mapping"] = offset_ranges
+    #             return out
+    #     else:
+    #         raise ValueError("split_by must be 'word' or 'sentence'")
+    #     return splitter
+
+    
+    # Define prediction function
+    def predict_fn(self, texts, mode = 'prob'):
+        """Wrapper for model predictions."""
+        print(texts)
+        target_label = "negative"
+        scores = []
+        for text in texts:
+            metrics = self.LLM_Handler.get_classification_metrics(text, target_label)
+            # Use log probabilities for more stable SHAP values
+            if mode == 'prob':
+                prob = metrics.get('normalized_prob_given_label')
+                scores.append(float(prob))
+            elif mode =='log':
+                log_prob = metrics.get('normalized_log_prob_given_label')
+                scores.append(float(log_prob))
+        return np.array(scores).reshape(-1, 1)
+
+
+def nltk_sentence_splitter(s, return_offsets_mapping=True):
+    tokenizer = nltk.data.load('tokenizers/punkt/english.pickle')
+    spans = list(tokenizer.span_tokenize(s))
+    input_ids = [s[start:end] for start, end in spans]
+    out = {"input_ids": input_ids}
+    if return_offsets_mapping:
+        out["offset_mapping"] = spans
+    return out
+
+
 
 if __name__ == "__main__":
     model_name = "meta-llama/Llama-3.2-1B"
     load_dotenv('/home/hrahmani/CausalContextAttributer/config.env')
     hf_auth_token  = os.environ.get("HF_API_KEY")
-    class_labels = ["Technology", "Politics", "Sports", "Art", "Other"]
+    
+    class_labels = ["negative", "positive"]
     llm_handler = LLM_Handler(class_labels, hf_auth_token, model_name)
     attributer = Attributer(llm_handler=llm_handler)
-    text = "Local Mayor Launches Initiative to enhance urban public transport."
-    target_label = "Politics"
-        # Get attributions as (word, score) tuples
-    # ame_lasso_attributions = attributer.attribute(text, num_datasets=1000, method_name='lasso')
+    # SHAP setup
+    split_by = "word"
+    masker = shap.maskers.Text(attributer.get_split_function(split_by="word"))
+    explainer = shap.Explainer(attributer.predict_fn, masker)
+    text = "i was wrong."
+    # text = "i went and saw this movie last night after being coaxed to by a few friends of mine ." \
+    # " I'll admit that i was reluctant to see it because from what i knew of ashton kutcher he was only able to do comedy . " \
+    # "i was wrong . " \
+    # "kutcher played the character of jake fischer very well , and kevin costner played ben randall with such professionalism ." \
+    # " the sign of a good movie is that it can toy with our emotions . " \
+    # "this one did exactly that . the entire theater ( which was sold out ) was overcome by laughter during the"
+    # text = "i went and saw this movie last night after being coaxed to by a few friends of mine. i was wrong. It was a terrific movie."
+    shap_values = explainer([text])
+    print(shap_values.data[0])
+    print(shap_values.values[0])
+    ame_lasso_attributions, ame_ortho_attributions = attributer.attribute_ame(text, num_datasets=1000, split_by=split_by)
+
+    # Print results
+    print("\nAME lasso Attributions:")
+    for word, score in ame_lasso_attributions:
+        print(f"{word}: {score:.4f}")
+
+
+
+
+
+    # text = "i went and saw this movie last night after being coaxed to by a few friends of mine ." \
+    # " I'll admit that i was reluctant to see it because from what i knew of ashton kutcher he was only able to do comedy . " \
+    # "i was wrong . " \
+    # "kutcher played the character of jake fischer very well , and kevin costner played ben randall with such professionalism ." \
+    # " the sign of a good movie is that it can toy with our emotions . " \
+    # "this one did exactly that . the entire theater ( which was sold out ) was overcome by laughter during the"
+    # split_by = 'sentence'
+    # target_label = llm_handler.get_predicted_class(text)
+    # print(f'predicted label is {target_label}')
+
+    # # class_labels = ["Technology", "Politics", "Sports", "Art", "Other"]
+    # # llm_handler = LLM_Handler(class_labels, hf_auth_token, model_name)
+    # # attributer = Attributer(llm_handler=llm_handler)
+    # # text = "Local Mayor Launches Initiative to enhance urban public transport."
+    # # target_label = "Politics"
+
+    # ame_lasso_attributions, ame_ortho_attributions = attributer.attribute_ame(text, num_datasets=1000, split_by=split_by)
 
     # # Print results
     # print("\nAME lasso Attributions:")
@@ -459,29 +514,21 @@ if __name__ == "__main__":
     #     print(f"{word}: {score:.4f}")
     
     # print("by AME lasso normalized log probability drops by", attributer.compute_log_prob_drop(text, ame_lasso_attributions, k=1))
-    ame_lasso_attributions, ame_ortho_attributions = attributer.attribute_ame(text, num_datasets=1000)
 
-    # Print results
-    print("\nAME lasso Attributions:")
-    for word, score in ame_lasso_attributions:
-        print(f"{word}: {score:.4f}")
+    # print("\nAME orthogonal Attributions:")
+    # for word, score in ame_ortho_attributions:
+    #     print(f"{word}: {score:.4f}")
     
-    print("by AME lasso normalized log probability drops by", attributer.compute_log_prob_drop(text, ame_lasso_attributions, k=1))
+    # print("by AME Orthogonal normalized log probability drops by", attributer.compute_log_prob_drop(text, ame_ortho_attributions, k=1))
 
-    print("\nAME orthogonal Attributions:")
-    for word, score in ame_ortho_attributions:
-        print(f"{word}: {score:.4f}")
-    
-    print("by AME Orthogonal normalized log probability drops by", attributer.compute_log_prob_drop(text, ame_ortho_attributions, k=1))
+    # print(f'the spaersman correlation between lasso and orthogonal {attributer.compute_spearman_correlation(shap_attrs=ame_ortho_attributions, ame_attrs=ame_lasso_attributions)}')
 
-    print(f'the spaersman correlation between lasso and orthogonal {attributer.compute_spearman_correlation(shap_attrs=ame_ortho_attributions, ame_attrs=ame_lasso_attributions)}')
+    # shap_attributions = attributer.attribute_shap(text, target_label, nsamples=1000, split_by=split_by)
+    # print("\nSHAP Attributions:")
+    # for word, score in shap_attributions:
+    #     print(f"{word}: {score:.4f}")
 
-    shap_attributions = attributer.attribute_shap(text, target_label, nsamples=1000)
-    print("\nSHAP Attributions:")
-    for word, score in shap_attributions:
-        print(f"{word}: {score:.4f}")
-
-    print(f'the spaersman correlation between shap and ame_lasso{attributer.compute_spearman_correlation(shap_attrs=shap_attributions, ame_attrs=ame_lasso_attributions)}')
+    # print(f'the spaersman correlation between shap and ame_lasso{attributer.compute_spearman_correlation(shap_attrs=shap_attributions, ame_attrs=ame_lasso_attributions)}')
 
     
 # if __name__ == "__main__":

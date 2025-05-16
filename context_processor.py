@@ -87,31 +87,72 @@ class EfficientTextProcessor:
         cache_key = self._get_partition_key(text, split_by)
         if cache_key in self._partition_cache:
             return self._partition_cache[cache_key]
-
+        
         if split_by == "sentence":
             parts = []
             indices = []
-            # Use NLTK span_tokenize to get sentences plus their offsets
             for span in self.sentence_tokenizer.span_tokenize(text):
                 start, end = span
                 parts.append(text[start:end])
                 indices.append((start, end))
-                
         elif split_by == "word":
-            parts = []
+            parts = nltk.word_tokenize(text)
             indices = []
-            # Use regex or spaCy to find words plus their offsets
-            # Here we go with the regex approach for efficiency
-            for match in self._word_pattern.finditer(text):
-                start, end = match.span()
-                parts.append(text[start:end])
+            pos = 0
+            for token in parts:
+                start = text.find(token, pos)
+                if start == -1:  # Handle rare cases where token isn't found
+                    start = pos
+                end = start + len(token)
                 indices.append((start, end))
+                pos = end
         else:
             raise ValueError(f"Invalid split_by value: {split_by}")
 
         partition = TextPartition(parts=parts, indices=indices, part_type=split_by)
         self._partition_cache[cache_key] = partition
         return partition
+    
+    
+    # def split_text(self, text: str, split_by: str = "sentence") -> TextPartition:
+    #     """
+    #     Split `text` into parts (sentences or words), track their character offsets, and cache results.
+        
+    #     Args:
+    #         text: The original text to be split.
+    #         split_by: Either 'sentence' or 'word'.
+        
+    #     Returns:
+    #         A TextPartition object containing the parts, their indices, and the partition type.
+    #     """
+    #     cache_key = self._get_partition_key(text, split_by)
+    #     if cache_key in self._partition_cache:
+    #         return self._partition_cache[cache_key]
+
+    #     if split_by == "sentence":
+    #         parts = []
+    #         indices = []
+    #         # Use NLTK span_tokenize to get sentences plus their offsets
+    #         for span in self.sentence_tokenizer.span_tokenize(text):
+    #             start, end = span
+    #             parts.append(text[start:end])
+    #             indices.append((start, end))
+                
+    #     elif split_by == "word":
+    #         parts = []
+    #         indices = []
+    #         # Use regex or spaCy to find words plus their offsets
+    #         # Here we go with the regex approach for efficiency
+    #         for match in self._word_pattern.finditer(text):
+    #             start, end = match.span()
+    #             parts.append(text[start:end])
+    #             indices.append((start, end))
+    #     else:
+    #         raise ValueError(f"Invalid split_by value: {split_by}")
+
+    #     partition = TextPartition(parts=parts, indices=indices, part_type=split_by)
+    #     self._partition_cache[cache_key] = partition
+    #     return partition
 
 
     def create_masked_sample(self, 
