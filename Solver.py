@@ -321,8 +321,8 @@ class PytorchRLearner:
             loss.backward()
             optimizer.step()
             
-            if (epoch + 1) % 1000 == 0:
-                print(f'Epoch [{epoch+1}/{self.n_epochs}], Loss: {loss.item():.4f}')
+            # if (epoch + 1) % 1000 == 0:
+            #     print(f'Epoch [{epoch+1}/{self.n_epochs}], Loss: {loss.item():.4f}')
 
         self.cate_model.eval()
         with torch.no_grad():
@@ -346,43 +346,38 @@ def estimate_all_treatments(X, y):
     results = {}
     econml_results = {}
     for i in range(n_treatments):
-        print(f"\nEstimating CATE for treatment {i} (PyTorch R-learner)")
-        # Extract current treatment and remaining features
+        # print(f"\nEstimating CATE for treatment {i} (PyTorch R-learner)")
         T = X[:, i]
         X_reduced = np.delete(X, i, axis=1)
-        # PyTorch R-learner
-        rlearner = PytorchRLearner(
-            learning_rate=0.01,
-            n_epochs=2000,
-            batch_size=32
-        )
-        print(f'Treatment feature {i} shape is {T.shape} for MYorthogonal method.')
-        treatment_results = rlearner.estimate_cate(X_reduced, T, y)
-
-        results[f'treatment_{i}'] = {
-            'ate': treatment_results['ate'],
-            'cate_estimates': treatment_results['cate_estimates'],
-            'final_loss': treatment_results['final_loss']
-        }
+        # rlearner = PytorchRLearner(
+        #     learning_rate=0.01,
+        #     n_epochs=2000,
+        #     batch_size=32
+        # )
+        # treatment_results = rlearner.estimate_cate(X_reduced, T, y)
+        # results[f'treatment_{i}'] = {
+        #     'ate': treatment_results['ate'],
+        #     'cate_estimates': treatment_results['cate_estimates'],
+        #     'final_loss': treatment_results['final_loss']
+        # }
         # EconML DML
         print(f"Estimating CATE for treatment {i} (EconML NonParamDML)")
         econml_learner = EconMLDMLLearner()
-        print(f'X_reduced shape is {X_reduced.shape}')
-        print(f'Treatmentfeature {i} shape is {T.shape}')
 
         econml_treatment_results = econml_learner.estimate_cate( X=X_reduced, T=T, y=y)
         econml_results[f'treatment_{i}'] = {
+            'cate_attributions': econml_treatment_results['cate_attributions'],
             'ate': econml_treatment_results['ate'],
             'cate_estimates': econml_treatment_results['cate_estimates'],
-            'final_loss': econml_treatment_results['final_loss']
+            'cate_model': econml_treatment_results['cate_model']
         }
         # Print comparison
-        print(f"PyTorch R-learner ATE: {treatment_results['ate']:.3f}")
-        print(f"EconML DML ATE: {econml_treatment_results['ate']:.3f}")
-        print(f"PyTorch R-learner CATE std: {np.std(treatment_results['cate_estimates']):.3f}")
-        print(f"EconML DML CATE std: {np.std(econml_treatment_results['cate_estimates']):.3f}")
-        print(f"PyTorch R-learner Final Loss: {treatment_results['final_loss']}")
-        print(f"EconML DML Final Loss: {econml_treatment_results['final_loss']}")
+        # print(f"PyTorch R-learner ATE: {treatment_results['ate']:.3f}")
+        # print(f"EconML DML ATE: {econml_treatment_results['ate']:.3f}")
+        # print(f"PyTorch R-learner CATE std: {np.std(treatment_results['cate_estimates']):.3f}")
+        # print(f"EconML DML CATE std: {np.std(econml_treatment_results['cate_estimates']):.3f}")
+        # print(f"PyTorch R-learner Final Loss: {treatment_results['final_loss']}")
+        # print(f"EconML DML Final Loss: {econml_treatment_results['final_loss']}")
     return {'pytorch': results, 'econml': econml_results}
 
 # # Example usage:
@@ -404,16 +399,15 @@ def estimate_all_treatments(X, y):
 #         print(f"CATE std: {np.std(results['cate_estimates']):.3f}")
 
 class EconMLDMLLearner:
-    def __init__(self, n_estimators=100, max_depth=3, random_state=123):
+    def __init__(self, n_estimators=100, max_depth=5, random_state=123):
         self.n_estimators = n_estimators
         self.max_depth = max_depth
         self.random_state = random_state
 
     def estimate_cate(self, X, T, y):
         n_train = X.shape[0]
-        # Use GradientBoostingRegressor for all models as in your example
         T = (T > 0.5).astype(np.int32)  # Convert to binary (0 or 1)
-        print(f"T shape: {T.shape}, Unique values: {np.unique(T)}")  # Debug print
+        # print(f"T shape: {T.shape}, Unique values: {np.unique(T)}")  # Debug print
         model_t = GradientBoostingClassifier(
             n_estimators=self.n_estimators,
             max_depth=self.max_depth,
@@ -440,13 +434,14 @@ class EconMLDMLLearner:
             random_state=self.random_state
         )
         dml.fit(y, T, X=X, W=None)
-        # For comparison, generate CATE estimates on a uniform sample as in PytorchRLearner
-        uniform_samples = utils.generate_bernoulli_matrix(n_features=X.shape[1], n_samples=1000, p_min=0, p_max=1)
+        uniform_samples = utils.generate_bernoulli_matrix(n_features=X.shape[1], n_samples=2000, p_min=0, p_max=1)
         cate_estimates = dml.effect(uniform_samples)
+        cate_attribution = dml.effect(np.ones((1,X.shape[1]))) # CATE(| X_i s = 1) it's what happens in the text.
         return {
+            'cate_attributions': cate_attribution,
             'cate_estimates': cate_estimates,
             'ate': np.mean(cate_estimates),
-            'final_loss': None  # Not directly available from econml
+            'cate_model': dml  # Not directly available from econml
         }
 
 def estimate_all_treatments_econml(X, y):
@@ -464,6 +459,79 @@ def estimate_all_treatments_econml(X, y):
         results[f'treatment_{i}'] = {
             'ate': treatment_results['ate'],
             'cate_estimates': treatment_results['cate_estimates'],
-            'final_loss': treatment_results['final_loss']
+            'cate_model': treatment_results['cate_model']
         }
     return results
+
+
+def calculate_conditional_ate(
+    all_results,
+    treatment_idx,
+    condition_idx,
+    condition_value,
+    n_sources,
+    n_samples=2000
+):
+    """
+    Calculates the ATE of a treatment conditional on the value of another treatment.
+
+    Args:
+        all_results (dict): The output from estimate_all_treatments.
+        treatment_idx (int): The index of the main treatment (e.g., 'i').
+        condition_idx (int): The index of the treatment to condition on (e.g., 'j').
+        condition_value (int): The value to set the conditioning treatment to (0 or 1).
+        n_samples (int): The number of samples to generate for the context.
+
+    Returns:
+        float: The estimated Conditional Average Treatment Effect.
+    """
+    model_results = all_results['econml'][f'treatment_{treatment_idx}']
+    cate_model = model_results['cate_model']
+    n_features_for_model = n_sources -1 # n_treatments - 1
+
+    # 2. Generate a background context matrix for all other features
+    # This represents the features we want to average over.
+    X_context = utils.generate_bernoulli_matrix(
+        n_features=n_features_for_model,
+        n_samples=n_samples
+    )
+    if condition_idx == treatment_idx:
+        raise ValueError("Treatment index and condition index cannot be the same.")
+    
+    # This is the crucial index mapping logic
+    if condition_idx < treatment_idx:
+        context_col_idx = condition_idx
+    else:
+        context_col_idx = condition_idx - 1
+
+    X_context[:, context_col_idx] = condition_value
+
+    cate_estimates = cate_model.effect(X_context)
+    return np.mean(cate_estimates)
+
+
+def calculate_joint_ate(all_results, i, j, n_sources):
+    """
+    Calculates the Joint Average Treatment Effect (JATE) for a pair of treatments.
+
+    Args:
+        all_results (dict): The output from estimate_all_treatments.
+        i (int): The index of the first treatment.
+        j (int): The index of the second treatment.
+        method (str): 'shapley' to average over both paths, or 'path1' for one path.
+
+    Returns:
+        float: The estimated Joint Average Treatment Effect.
+    """
+    # Path 1: CATE(i | Tj=1) + CATE(j | Ti=0)
+    cate_i_given_j_on = calculate_conditional_ate(all_results, treatment_idx=i, condition_idx=j, condition_value=1, n_sources=n_sources)
+    cate_j_given_i_off = calculate_conditional_ate(all_results, treatment_idx=j, condition_idx=i, condition_value=0, n_sources=n_sources)
+    jate_path1 = cate_i_given_j_on + cate_j_given_i_off
+    
+    # Path 2: CATE(j | Ti=1) + CATE(i | Tj=0)
+    cate_j_given_i_on = calculate_conditional_ate(all_results, treatment_idx=j, condition_idx=i, condition_value=1, n_sources=n_sources)
+    cate_i_given_j_off = calculate_conditional_ate(all_results, treatment_idx=i, condition_idx=j, condition_value=0, n_sources=n_sources)
+    jate_path2 = cate_j_given_i_on + cate_i_given_j_off
+
+    # The Shapley method averages the results from both paths for a more robust estimate.
+    return jate_path1, jate_path2, (jate_path1 + jate_path2) / 2

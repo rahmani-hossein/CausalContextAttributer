@@ -3,16 +3,11 @@ import numpy as np
 import re
 from typing import List, Tuple, Dict
 from spacy.lang.en import English
+from nltk.tokenize import TweetTokenizer
 from dataclasses import dataclass
 from functools import lru_cache
 from llm_handler import LLM_Handler
-
-# --- Ensure NLTK data for sentence tokenizer is available ---
-try:
-    nltk.data.find('tokenizers/punkt')
-except LookupError:
-    nltk.download('punkt')
-
+from spacy.lang.en import English
 
 @dataclass
 class TextPartition:
@@ -45,33 +40,11 @@ class EfficientTextProcessor:
         self.pval = pval
         
         # Lazy-loaded tokenizers
-        self._sentence_tokenizer = None
-        self._word_tokenizer = None
-        
+        self.sentence_tokenizer = nltk.data.load('tokenizers/punkt/english.pickle')
+        self.spacy_nlp = English()
         # Pre-compile a word pattern for regex-based splitting
         self._word_pattern = re.compile(r'\b\w+\b')
-        
-        # Cache for partition results
-        self._partition_cache: Dict[str, TextPartition] = {}
 
-    @property
-    def sentence_tokenizer(self):
-        """Lazy loading of NLTK sentence tokenizer."""
-        if self._sentence_tokenizer is None:
-            self._sentence_tokenizer = nltk.data.load('tokenizers/punkt/english.pickle')
-        return self._sentence_tokenizer
-    
-    @property
-    def word_tokenizer(self):
-        """Lazy loading of spaCy word tokenizer."""
-        if self._word_tokenizer is None:
-            self._word_tokenizer = English().tokenizer
-        return self._word_tokenizer
-
-    @lru_cache(maxsize=1000)
-    def _get_partition_key(self, text: str, split_by: str) -> str:
-        """Create a unique cache key based on the text content and splitting type."""
-        return f"{hash(text)}:{split_by}"
 
     def split_text(self, text: str, split_by: str = "sentence") -> TextPartition:
         """
@@ -84,10 +57,7 @@ class EfficientTextProcessor:
         Returns:
             A TextPartition object containing the parts, their indices, and the partition type.
         """
-        cache_key = self._get_partition_key(text, split_by)
-        if cache_key in self._partition_cache:
-            return self._partition_cache[cache_key]
-        
+
         if split_by == "sentence":
             parts = []
             indices = []
@@ -96,21 +66,14 @@ class EfficientTextProcessor:
                 parts.append(text[start:end])
                 indices.append((start, end))
         elif split_by == "word":
-            parts = nltk.word_tokenize(text)
-            indices = []
-            pos = 0
-            for token in parts:
-                start = text.find(token, pos)
-                if start == -1:  # Handle rare cases where token isn't found
-                    start = pos
-                end = start + len(token)
-                indices.append((start, end))
-                pos = end
+            doc = self.spacy_nlp(text)
+            parts = [token.text for token in doc]
+            indices = [(token.idx, token.idx + len(token)) for token in doc]
         else:
             raise ValueError(f"Invalid split_by value: {split_by}")
 
         partition = TextPartition(parts=parts, indices=indices, part_type=split_by)
-        self._partition_cache[cache_key] = partition
+
         return partition
     
     
