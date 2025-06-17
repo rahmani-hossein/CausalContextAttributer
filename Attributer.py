@@ -65,9 +65,9 @@ class Attributer:
             lasso_coefficients = lasso_solver.fit(X, y_lognormalized)
             # lasso_source_attributions = list(zip(partition.parts, lasso_coefficients))
             all_results = Solver.estimate_all_treatments(X, y_lognormalized)
-            i= 2
-            j=4
-            print(f' the joint ATEof the source {i} and {j} is: (three different methods ){Solver.calculate_joint_ate(all_results=all_results, i = i, j = j, n_sources=X.shape[1])}')
+            # i= 2
+            # j=3
+            # print(f' the joint ATEof the source {i} and {j} is: (three different methods ){Solver.calculate_joint_ate(all_results=all_results, i = i, j = j, n_sources=X.shape[1])}')
             ortho_result = all_results['econml']
             ortho_coefficients = []
             ortho_cate_attributions = []
@@ -247,7 +247,6 @@ class Attributer:
         for word in words_to_remove:
             modified_text = re.sub(r'\b' + re.escape(word) + r'\b', '__', modified_text)
 
-        print(modified_text)
         modified_label = self.LLM_Handler.get_predicted_class(modified_text)
         modified_metrics = self.LLM_Handler.get_classification_metrics(modified_text, original_label)
         modified_log_prob = modified_metrics['normalized_log_prob_given_label']
@@ -314,9 +313,9 @@ class Attributer:
         """
         
         os.makedirs(save_dir, exist_ok=True)
-        methods = ['lasso', 'orthogonal', 'shap']
+        methods = ['lasso', 'orthogonal', 'shap', 'cate']
         results = {method: {k: {'log_prob_drops': [], 'label_changes': []} for k in k_values} for method in methods}
-        spearman_results = {('lasso', 'orthogonal'): [], ('lasso', 'shap'): [], ('orthogonal', 'shap'): []}
+        spearman_results = {('lasso', 'orthogonal'): [], ('lasso', 'shap'): [], ('orthogonal', 'shap'): [], ('cate', 'lasso'): [], ('cate', 'orthogonal'): [], ('cate', 'shap'): []}
 
         for text in data:
             target_label = self.LLM_Handler.get_predicted_class(text)
@@ -325,12 +324,14 @@ class Attributer:
             parts = ame_output["partition"]
             lasso_coeffs = ame_output["lasso_coefficients"]
             ortho_coeffs = ame_output["ortho_coefficients"]
+            cate_coeffs = ame_output["ortho_cate_attributions"]
             shap_parts, shap_coeffs = self.attribute_shap(text, target_label, nsamples=nsamples, split_by=split_by)
             ame_lasso_attributions = list(zip(parts, lasso_coeffs))
             ame_ortho_attributions = list(zip(parts, ortho_coeffs))
             shap_attributions = list(zip(shap_parts, shap_coeffs))
+            cate_attributions = list(zip(parts, cate_coeffs))
             # For each method, for each k, compute log prob drop and label change
-            for method, attributions in zip(methods, [ame_lasso_attributions, ame_ortho_attributions, shap_attributions]):
+            for method, attributions in zip(methods, [ame_lasso_attributions, ame_ortho_attributions, shap_attributions, cate_attributions]):
                 for k in k_values:
                     metrics = self.compute_log_prob_drop(text, attributions, k)
                     # If compute_log_prob_drop returns a float, treat as log_prob_drop only
@@ -354,6 +355,10 @@ class Attributer:
             spearman_results[('lasso', 'orthogonal')].append(self.compute_spearman_correlation(parts1=parts, parts2=parts, attrs1=lasso_coeffs, attrs2=ortho_coeffs))
             spearman_results[('lasso', 'shap')].append(self.compute_spearman_correlation(parts1=parts, parts2=shap_parts, attrs1=lasso_coeffs, attrs2=shap_coeffs))
             spearman_results[('orthogonal', 'shap')].append(self.compute_spearman_correlation(parts1=parts, parts2=shap_parts, attrs1=ortho_coeffs, attrs2=shap_coeffs))
+            spearman_results[('cate', 'lasso')].append(self.compute_spearman_correlation(parts1=parts, parts2=shap_parts, attrs1=cate_coeffs, attrs2=lasso_coeffs))
+            spearman_results[('cate', 'orthogonal')].append(self.compute_spearman_correlation(parts1=parts, parts2=shap_parts, attrs1=cate_coeffs, attrs2=ortho_coeffs))
+            spearman_results[('cate', 'shap')].append(self.compute_spearman_correlation(parts1=parts, parts2=shap_parts, attrs1=cate_coeffs, attrs2=shap_coeffs))
+
 
         # Aggregate results
         summary = {method: {} for method in methods}
@@ -374,7 +379,7 @@ class Attributer:
         plt.figure(figsize=(10,6))
         width = 0.25
         x = np.arange(len(k_values))
-        colors = ['#2ecc71', '#3498db', '#e74c3c']
+        colors = ['#2ecc71', '#3498db', '#e74c3c', '#f1c40f']
         for i, (method, color) in enumerate(zip(methods, colors)):
             means = [summary[method][k]['mean_log_prob_drop'] for k in k_values]
             stds = [summary[method][k]['std_log_prob_drop'] for k in k_values]
@@ -445,47 +450,59 @@ if __name__ == "__main__":
     # "this one did exactly that . the entire theater ( which was sold out ) was overcome by laughter during the"
     # split_by = 'sentence'
     data = [
-        "it's a negative sentiment", "I feel terrible, negative.", "I was wrong", "he doesn't like dark comedy", "An American came to post-World War II Europe and finds himself entangled in a dangerous mystery", "This booldy decision had great result", "he acted childish and awful."
+        "it's not good feeling.", "it's a negative sentiment", "I feel terrible, negative.", "I was wrong", "he doesn't like dark comedy", "An American came to post-World War II Europe and finds himself entangled in a dangerous mystery", "This booldy decision had great result", "he acted childish and awful."
         "Wow, this movie was an absolute masterpiece… if you enjoy wasting two hours on predictable clichés and terrible acting.", "The food was delicious, but the service was so slow I nearly fell asleep waiting.", "This phone isn't bad for the price, but it's not exactly a game-changer either.", "I'm sure the team worked so hard to deliver this buggy, overpriced software.", "The plot was thin, but the visuals were a feast for the eyes."
         "The concert was interesting, with unexpected twists in the performance.", "Oh, fantastic, another meeting that could've been an email.", "The hotel room was cozy, but the noise from the street was unbearable.", "The new policy ensures everyone gets a fair share, unless you're late to the meeting.", "The algorithm's precision was decent, but its recall left much to be desired."
         "This app isn't terrible, but it's hardly a must-have either.", "The performance wasn't amazing, but it got the job done.", "Not like this restaurant's food is anything to write home about.", "I can't say I'm thrilled with the results, but I'm not disappointed either.", "The service wouldn't be bad if they didn't ignore us for an hour."
     ]
     
     split_by = 'word'
-    # attributer.run_local_benchmark(data, k_values=[1,2,3], nsamples=1000, split_by=split_by)
+    attributer.run_local_benchmark(data, k_values=[1,2,3], nsamples=1000, split_by=split_by)
 
-    text = data[1]
-    target_label = llm_handler.get_predicted_class(text)
-    print(f'text:{text}  /////predicted label: {target_label}')
-    ame_output = attributer.attribute_ame(text, num_datasets=1000, split_by=split_by)
-    partition = ame_output["partition"]
-    lasso_coeffs = ame_output["lasso_coefficients"]
-    ortho_coeffs = ame_output["ortho_coefficients"]
-    lasso_attributions = list(zip(partition, lasso_coeffs))
-    ortho_attributions = list(zip(partition, ortho_coeffs))
-    print("\nAME lasso Attributions:")
-    for word, score in lasso_attributions:
-        print(f"{word}: {float(score):.4f}")
-    print("by AME lasso normalized log probability drops by", attributer.compute_log_prob_drop(text, lasso_attributions, k=1))
+    # text = data[0]
+    # target_label = llm_handler.get_predicted_class(text)
+    # print(f'text:{text}  /////predicted label: {target_label}')
+    # ame_output = attributer.attribute_ame(text, num_datasets=1000, split_by=split_by)
+    # partition = ame_output["partition"]
+    # lasso_coeffs = ame_output["lasso_coefficients"]
+    # ortho_coeffs = ame_output["ortho_coefficients"]
+    # cate_coeffs = ame_output["ortho_cate_attributions"]
+    # lasso_attributions = list(zip(partition, lasso_coeffs))
+    # ortho_attributions = list(zip(partition, ortho_coeffs))
+    # cate_attributions = list(zip(partition, cate_coeffs))
+    # print("\nAME lasso Attributions:")
+    # for word, score in lasso_attributions:
+    #     print(f"{word}: {float(score):.4f}")
+    # print("by AME lasso normalized log probability drops by", attributer.compute_log_prob_drop(text, lasso_attributions, k=1))
 
-    print("\nAME orthogonal Attributions:")
-    for word, score in ortho_attributions:
-        print(f"{word}: {float(score):.4f}")
-    print("by AME Orthogonal normalized log probability drops by", attributer.compute_log_prob_drop(text, ortho_attributions, k=1))
+    # print("\nAME orthogonal Attributions:")
+    # for word, score in ortho_attributions:
+    #     print(f"{word}: {float(score):.4f}")
+    # print("by AME Orthogonal normalized log probability drops by", attributer.compute_log_prob_drop(text, ortho_attributions, k=1))
 
-    print(f'the spaersman correlation between lasso and orthogonal {attributer.compute_spearman_correlation(parts1=partition, parts2=partition, attrs1=lasso_coeffs, attrs2=ortho_coeffs)}')
+    # print(f'the spaersman correlation between lasso and orthogonal {attributer.compute_spearman_correlation(parts1=partition, parts2=partition, attrs1=lasso_coeffs, attrs2=ortho_coeffs)}')
 
-    # SHAP attribution and alignment
-    shap_parts, shap_coeffs = attributer.attribute_shap(text, target_label, nsamples=1000, split_by=split_by)
-    shap_coeffs = [float(s) for s in shap_coeffs]
-    shap_attributions = list(zip(shap_parts, shap_coeffs))
-    print("\nSHAP Attributions:")
-    for word, score in shap_attributions:
-        print(f"{word}: {float(score):.4f}")
-    print("by SHAP normalized log probability drops by", attributer.compute_log_prob_drop(text, shap_attributions, k=1))
+    # print("\nAME cate Attributions:")
+    # for word, score in cate_attributions:
+    #     print(f"{word}: {float(score):.4f}")
+    # print("by AME cate normalized log probability drops by", attributer.compute_log_prob_drop(text, cate_attributions, k=1))
 
-    print(f'the spaersman correlation between shap and ame_lasso {attributer.compute_spearman_correlation(parts1=shap_parts, parts2=partition, attrs1=shap_coeffs, attrs2=lasso_coeffs)}')
-    print(f'the spaersman correlation between shap and ame_ortho {attributer.compute_spearman_correlation(parts1=shap_parts, parts2=partition, attrs1=shap_coeffs, attrs2=ortho_coeffs)}')
+    # print(f'the spaersman correlation between cate and orthogonal {attributer.compute_spearman_correlation(parts1=partition, parts2=partition, attrs1=cate_coeffs, attrs2=ortho_coeffs)} and between cate and lasso {attributer.compute_spearman_correlation(parts1=partition, parts2=partition, attrs1=lasso_coeffs, attrs2=cate_coeffs)}')
+
+
+
+    # # SHAP attribution and alignment
+    # shap_parts, shap_coeffs = attributer.attribute_shap(text, target_label, nsamples=1000, split_by=split_by)
+    # shap_coeffs = [float(s) for s in shap_coeffs]
+    # shap_attributions = list(zip(shap_parts, shap_coeffs))
+    # print("\nSHAP Attributions:")
+    # for word, score in shap_attributions:
+    #     print(f"{word}: {float(score):.4f}")
+    # print("by SHAP normalized log probability drops by", attributer.compute_log_prob_drop(text, shap_attributions, k=1))
+
+    # print(f'the spaersman correlation between shap and ame_lasso {attributer.compute_spearman_correlation(parts1=shap_parts, parts2=partition, attrs1=shap_coeffs, attrs2=lasso_coeffs)}')
+    # print(f'the spaersman correlation between shap and ame_ortho {attributer.compute_spearman_correlation(parts1=shap_parts, parts2=partition, attrs1=shap_coeffs, attrs2=ortho_coeffs)}')
+    # print(f'the spaersman correlation between shap and ame_cate {attributer.compute_spearman_correlation(parts1=shap_parts, parts2=partition, attrs1=shap_coeffs, attrs2=cate_coeffs)}')
 
 
 # if __name__ == "__main__":
