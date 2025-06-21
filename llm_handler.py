@@ -9,6 +9,7 @@ from dotenv import load_dotenv
 import re
 import os
 from utils import split_text
+import torch.nn.functional as F
 
 class LLM_Handler:
     def __init__ (self, class_labels : List, hf_auth_token, model_name: str ):
@@ -142,76 +143,129 @@ class LlamaHandler:
         self.model.to(self.device)
         self.class_labels = class_labels
 
-    def classify(self, text, true_label):
-        """
-        Classifies the input text into one of the class labels, returns (label, logprob).
-        """
+    def classify_with_logprob(self, text: str):
         label_list = ", ".join(f'"{lbl}"' for lbl in self.class_labels)
         messages = [
-            {"role": "system", "content": f"You are a helpful assistant that classifies text sentiment. Only answer with one word, which must be one of: {label_list}."},
-            {"role": "user", "content": f'Classify the following text into one of the categories ({label_list}). Only output the category word, nothing else.\\n\\nText: "{text}"'},
-        ]
-        inputs = self.tokenizer.apply_chat_template(messages, add_generation_prompt=True, return_tensors="pt").to(self.device)
+                    {"role": "system", "content": f"You are a helpful assistant that classifies text. Only answer with one word, which must be one of: {label_list}."},
+                    {"role": "user", "content": f'Classify the following text into one of the categories ({label_list}). Only output the category word, nothing else.\\n\\nText: "{text}"'},
+                ]
+        input_ids = self.tokenizer.apply_chat_template(messages, add_generation_prompt=True, return_tensors="pt").to(self.device)
+
         with torch.no_grad():
             outputs = self.model.generate(
-                inputs,
-                max_new_tokens=2,
+                input_ids=input_ids,
+                max_new_tokens=3,
+                temperature=0.0,           # enforce deterministic decoding
+                do_sample=False,
                 output_scores=True,
                 return_dict_in_generate=True,
                 pad_token_id=self.tokenizer.eos_token_id,
-                do_sample=False
-            )
-        generated_ids = outputs.sequences[0][inputs.shape[1]:]
-        generated_text = self.tokenizer.decode(generated_ids, skip_special_tokens=True).strip()
-        print(f'the generated text is {generated_text}')
-        # Find the best matching label
+                length_penalty=0.0)  # ← no division by length
+        seq = outputs.sequences[0]
+        gen_ids = seq[input_ids.shape[-1] :]
+        generated_text = self.tokenizer.decode(
+                gen_ids, skip_special_tokens=True
+            ).strip()
+        seq = outputs.sequences[0]
+        gen_ids = seq[input_ids.shape[-1] :]
+
+        generated_text = self.tokenizer.decode(
+            gen_ids, skip_special_tokens=True
+        ).strip()
+
+        # Match to one of your labels
+        chosen_label = generated_text
         for label in self.class_labels:
             if re.fullmatch(label, generated_text, re.IGNORECASE):
                 chosen_label = label
                 break
-        else:
-            print(f'we fall for finding label for {text}')
-            chosen_label = generated_text.split()[0]  # fallback: first word
-        # Compute log probability of the generated label token
-        transition_scores = self.model.compute_transition_scores(
-            outputs.sequences, outputs.scores, normalize_logits=True
-        )
-        logprob = transition_scores[0][0].item() if transition_scores[0].numel() > 0 else float('-inf')
-        return chosen_label, logprob
+        # Compute the log-probability
+        log_probs = 0.0
+        for i, logits in enumerate(outputs.scores):
+            token_id = gen_ids[i]
+            prob = F.softmax(logits, dim=-1)[0, token_id]
+            log_probs += torch.log(prob)
 
-    def answer_one_sentence(self, question, context=None):
+        return chosen_label, log_probs.item()
+
+    def generate_one_sentence_with_logprob(self, question: str, context: str = None, max_new_tokens: int = 50):
         """
         Answers the question in exactly one sentence, returns (sentence, logprob).
-        If context is provided, it is included in the prompt.
         """
         if context:
             user_content = f"Answer the following question in exactly one sentence.\\n\\nContext: {context}\\n\\nQuestion: {question}"
         else:
             user_content = f"Answer the following question in exactly one sentence.\\n\\nQuestion: {question}"
+        
         messages = [
             {"role": "system", "content": "You are a helpful assistant that always answers in exactly one sentence."},
             {"role": "user", "content": user_content},
         ]
-        inputs = self.tokenizer.apply_chat_template(messages, add_generation_prompt=True, return_tensors="pt").to(self.device)
+        input_ids = self.tokenizer.apply_chat_template(messages, add_generation_prompt=True, return_tensors="pt").to(self.device)
+
         with torch.no_grad():
             outputs = self.model.generate(
-                inputs,
-                max_new_tokens=64,
+                input_ids=input_ids,
+                max_new_tokens=max_new_tokens,
+                temperature=0.0,           # enforce deterministic decoding
+                do_sample=False,
                 output_scores=True,
                 return_dict_in_generate=True,
                 pad_token_id=self.tokenizer.eos_token_id,
-                do_sample=False
-            )
-        generated_ids = outputs.sequences[0][inputs.shape[1]:]
-        generated_text = self.tokenizer.decode(generated_ids, skip_special_tokens=True).strip()
-        # Extract only the first sentence
-        sentence = re.split(r'(?<=[.!?]) +', generated_text)[0]
-        # Compute log probability of the generated sentence tokens
-        transition_scores = self.model.compute_transition_scores(
-            outputs.sequences, outputs.scores, normalize_logits=True
-        )
-        logprob = transition_scores[0][:len(generated_ids)].sum().item() if transition_scores[0].numel() > 0 else float('-inf')
-        return sentence, logprob
+                length_penalty=0.0)  # ← no division by length
+        # decoding
+        seq = outputs.sequences[0]
+        gen_ids = seq[input_ids.shape[-1] :]
+        generated_text = self.tokenizer.decode(
+                gen_ids, skip_special_tokens=True
+            ).strip()
+        
+       
+        # Compute the log-probability
+        log_probs = 0.0
+        for i, logits in enumerate(outputs.scores):
+            token_id = gen_ids[i]
+            prob = F.softmax(logits, dim=-1)[0, token_id]
+            log_probs += torch.log(prob)
+        
+            
+        return generated_text, log_probs.item()
+
+    def compute_target_log_prob(self, question: str, target_answer: str, context: str = None) -> float:
+        """
+        Computes the log probability of a target_answer given a question and context.
+        """
+        if context:
+            user_content = f"Answer the following question in exactly one sentence.\\n\\nContext: {context}\\n\\nQuestion: {question}"
+        else:
+            user_content = f"Answer the following question in exactly one sentence.\\n\\nQuestion: {question}"
+        
+        messages = [
+            {"role": "system", "content": "You are a helpful assistant that always answers in exactly one sentence."},
+            {"role": "user", "content": user_content},
+        ]
+        
+        prompt = self.tokenizer.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
+        
+        prompt_ids = self.tokenizer(prompt, return_tensors="pt").to(self.device).input_ids
+        target_ids = self.tokenizer(target_answer, add_special_tokens=False, return_tensors="pt").to(self.device).input_ids
+        
+        input_ids = torch.cat([prompt_ids, target_ids], dim=1)
+        
+        with torch.no_grad():
+            outputs = self.model(input_ids, labels=input_ids)
+            logits = outputs.logits
+            
+        shift_logits = logits[:, :-1, :].contiguous()
+        shift_labels = input_ids[:, 1:].contiguous()
+        
+        log_probs_full = F.log_softmax(shift_logits, dim=-1)
+        token_log_probs = log_probs_full.gather(dim=-1, index=shift_labels.unsqueeze(-1)).squeeze(-1)
+        
+        target_token_log_probs = token_log_probs[:, (prompt_ids.shape[1] - 1):]
+        
+        return target_token_log_probs.sum().item()
+
 
 # Example usage for testing
 if __name__ == "__main__":
@@ -221,11 +275,37 @@ if __name__ == "__main__":
     hf_auth_token  = os.environ.get("HF_API_KEY")
     class_labels = ["positive", "negative", "neutral"]
     handler = LlamaHandler(class_labels, hf_auth_token, model_name)
+    
+    # Test for classify_one_word_with_logprob
     text = "Oh, fantastic, another meeting that could've been an email."
     true_label = "negative"
     import time
     start_time = time.time()
-    metrics = handler.classify(text, true_label)
+    label, logprob = handler.classify_with_logprob(text)
     end_time = time.time()
+    print(f"--- Classification Test ---")
+    print(f"Text: '{text}'")
+    print(f"Predicted Label: {label}, Log-Prob: {logprob:.4f}")
+    print(f"Time taken: {end_time - start_time:.2f} seconds\n")
+
+    # Test for generate_one_sentence_with_logprob
+    question = "What is the capital of France?"
+    start_time = time.time()
+    answer, logprob = handler.generate_one_sentence_with_logprob(question)
+    end_time = time.time()
+    print(f"--- Sentence Generation Test ---")
+    print(f"Question: '{question}'")
+    print(f"Answer: '{answer}', Log-Prob: {logprob:.4f}")
+    print(f"Time taken: {end_time - start_time:.2f} seconds\n")
+    
+    # Test for compute_target_log_prob
+    question = "What is the capital of France?"
+    target_answer = "The capital of France is Paris."
+    start_time = time.time()
+    logprob = handler.compute_target_log_prob(question, target_answer)
+    end_time = time.time()
+    print(f"--- Target Probability Test ---")
+    print(f"Question: '{question}'")
+    print(f"Target Answer: '{target_answer}'")
+    print(f"Log-Prob of Target: {logprob:.4f}")
     print(f"Time taken: {end_time - start_time:.2f} seconds")
-    print(metrics)
