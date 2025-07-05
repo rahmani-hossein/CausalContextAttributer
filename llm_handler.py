@@ -6,7 +6,6 @@ import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from typing import List, Dict, Tuple
 from dotenv import load_dotenv
-import re
 import os
 from utils import split_text
 import torch.nn.functional as F
@@ -21,12 +20,6 @@ class LLM_Handler:
        self.class_labels = class_labels
        self.class_tokens = {label: self.tokenizer.encode(label, add_special_tokens=False)[0]
                           for label in self.class_labels}
-       
-       if torch.cuda.is_available():
-           allocated = torch.cuda.memory_allocated(self.device) / 1024**3  # in GB
-           max_allocated = torch.cuda.max_memory_allocated(self.device) / 1024**3  # in GB
-           print(f"Current GPU memory allocated: {allocated:.2f} GB")
-           print(f"Max GPU memory allocated: {max_allocated:.2f} GB")
 
   
     def get_classification_metrics(self, text: str, label: str) -> Dict[str, float]:
@@ -107,27 +100,6 @@ class LLM_Handler:
             return max(class_probs, key=class_probs.get)
 
 
-
-
-# # Example Usage
-# if __name__ == "__main__":
-#     model_name="meta-llama/Llama-3.2-1B"
-#     load_dotenv('/home/hrahmani/CausalContextAttributer/config.env')
-#     hf_auth_token  = os.environ.get("HF_API_KEY")
-#     class_labels = ["Technology", "Politics", "Sports", "Art", "Other"]
-#     LLM_Handler = LLM_Handler(class_labels, hf_auth_token, model_name)
-
-#     # Single data point
-#     headline = "this painting from sport team barcelona is amazing"
-#     true_label = "Art"
-#     import time
-#     start_time = time.time()
-#     res = LLM_Handler.get_classification_metrics(headline, true_label)
-#     end_time = time.time()
-#     time_taken = end_time - start_time
-#     print(f"Time taken for llm call: {time_taken} seconds")
-#     print(res)
-
 class LlamaHandler:
     """
     Handler for Llama 3 8B-Instruct/phi mini for both classification (one-word) and question answering (one-sentence) tasks.
@@ -144,49 +116,62 @@ class LlamaHandler:
         self.class_labels = class_labels
 
     def classify_with_logprob(self, text: str):
+        """
+        Classifies the input text and returns the chosen label, the unnormalized logprobs (logits) for all class labels, and the normalized logprobs for all class labels.
+        Prints the normalized probabilities for all class labels for debugging.
+        Returns:
+            tuple: (chosen_label, unnormalized_logprobs_dict, normalized_logprobs_dict)
+        """
         label_list = ", ".join(f'"{lbl}"' for lbl in self.class_labels)
         messages = [
-                    {"role": "system", "content": f"You are a helpful assistant that classifies text. Only answer with one word, which must be one of: {label_list}."},
-                    {"role": "user", "content": f'Classify the following text into one of the categories ({label_list}). Only output the category word, nothing else.\\n\\nText: "{text}"'},
-                ]
+            {"role": "system", "content": f"You are a helpful assistant that classifies text. Only answer with one word, which must be one of: {label_list}."},
+            {"role": "user", "content": f'Classify the following text into one of the categories ({label_list}). Only output the category word, nothing else.\n\nText: "{text}"'},
+        ]
         input_ids = self.tokenizer.apply_chat_template(messages, add_generation_prompt=True, return_tensors="pt").to(self.device)
-
+        attention_mask = (input_ids != self.tokenizer.eos_token_id).long()
         with torch.no_grad():
             outputs = self.model.generate(
                 input_ids=input_ids,
+                attention_mask=attention_mask,
                 max_new_tokens=3,
-                temperature=0.0,           # enforce deterministic decoding
                 do_sample=False,
+                temperature=1.0,
+                top_p=1.0,
                 output_scores=True,
                 return_dict_in_generate=True,
-                pad_token_id=self.tokenizer.eos_token_id,
-                length_penalty=0.0)  # ← no division by length
+                pad_token_id=self.tokenizer.eos_token_id)
         seq = outputs.sequences[0]
-        gen_ids = seq[input_ids.shape[-1] :]
-        generated_text = self.tokenizer.decode(
-                gen_ids, skip_special_tokens=True
-            ).strip()
-        seq = outputs.sequences[0]
-        gen_ids = seq[input_ids.shape[-1] :]
+        gen_ids = seq[input_ids.shape[-1]:]
+        generated_text = self.tokenizer.decode(gen_ids, skip_special_tokens=True).strip()
 
-        generated_text = self.tokenizer.decode(
-            gen_ids, skip_special_tokens=True
-        ).strip()
-
-        # Match to one of your labels
-        chosen_label = generated_text
+        # Get token IDs for the first token of each label
+        label_token_ids = {}
         for label in self.class_labels:
-            if re.fullmatch(label, generated_text, re.IGNORECASE):
-                chosen_label = label
-                break
-        # Compute the log-probability
-        log_probs = 0.0
-        for i, logits in enumerate(outputs.scores):
-            token_id = gen_ids[i]
-            prob = F.softmax(logits, dim=-1)[0, token_id]
-            log_probs += torch.log(prob)
+            tokens = self.tokenizer.encode(label, add_special_tokens=False)
+            if tokens:
+                label_token_ids[label] = tokens[0]  # array with one value
 
-        return chosen_label, log_probs.item()
+        logits = outputs.scores[0]  # Shape: [1, vocab_size]
+        # Unnormalized logprobs (logits) for each label
+        probs = F.softmax(logits, dim=-1)[0, list(label_token_ids.values())]
+        print(probs)
+        logprobs = torch.log(probs)
+        # Normalized probabilities and logprobs
+        label_logits = torch.tensor([logits[0, label_token_ids[label]].item() for label in self.class_labels]).to(self.device)
+        label_probs = F.softmax(label_logits, dim=-1)
+        label_logprobs = torch.log(label_probs)
+
+        # print("Normalized class probabilities (first token):")
+        # for i, label in enumerate(self.class_labels):
+        #     print(f"  {label}: {label_probs[i].item():.4f}")
+
+        # Find the chosen label (highest normalized probability)
+        chosen_idx = torch.argmax(label_probs).item()
+        chosen_label = self.class_labels[chosen_idx]
+
+        unnormalized_logprobs = {label: logprobs[i].item() for i, label in enumerate(self.class_labels)}
+        normalized_logprobs = {label: label_logprobs[i].item() for i, label in enumerate(self.class_labels)}
+        return {'chosen_label':chosen_label, 'unnormalized_logprobs':unnormalized_logprobs, 'normalized_logprobs':normalized_logprobs}
 
     def generate_one_sentence_with_logprob(self, question: str, context: str = None, max_new_tokens: int = 50):
         """
@@ -202,17 +187,18 @@ class LlamaHandler:
             {"role": "user", "content": user_content},
         ]
         input_ids = self.tokenizer.apply_chat_template(messages, add_generation_prompt=True, return_tensors="pt").to(self.device)
-
+        attention_mask = (input_ids != self.tokenizer.eos_token_id).long()
         with torch.no_grad():
             outputs = self.model.generate(
                 input_ids=input_ids,
+                attention_mask=attention_mask,
                 max_new_tokens=max_new_tokens,
-                temperature=0.0,           # enforce deterministic decoding
                 do_sample=False,
+                temperature=1.0,
+                top_p=1.0,
                 output_scores=True,
                 return_dict_in_generate=True,
-                pad_token_id=self.tokenizer.eos_token_id,
-                length_penalty=0.0)  # ← no division by length
+                pad_token_id=self.tokenizer.eos_token_id)
         # decoding
         seq = outputs.sequences[0]
         gen_ids = seq[input_ids.shape[-1] :]
@@ -229,7 +215,7 @@ class LlamaHandler:
             log_probs += torch.log(prob)
         
             
-        return generated_text, log_probs.item()
+        return generated_text, log_probs.item(), gen_ids
 
     def compute_target_log_prob(self, question: str, target_answer: str, context: str = None) -> float:
         """
@@ -245,26 +231,39 @@ class LlamaHandler:
             {"role": "user", "content": user_content},
         ]
         
+        # Get the prompt as a string (not tokenized)
         prompt = self.tokenizer.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
         
+        # Tokenize prompt and target answer
         prompt_ids = self.tokenizer(prompt, return_tensors="pt").to(self.device).input_ids
         target_ids = self.tokenizer(target_answer, add_special_tokens=False, return_tensors="pt").to(self.device).input_ids
-        
         input_ids = torch.cat([prompt_ids, target_ids], dim=1)
-        
+        attention_mask = (input_ids != self.tokenizer.eos_token_id).long()
         with torch.no_grad():
-            outputs = self.model(input_ids, labels=input_ids)
+            outputs = self.model(input_ids, attention_mask=attention_mask, labels=input_ids)
             logits = outputs.logits
-            
+
+        # Shift logits and labels for next-token prediction
         shift_logits = logits[:, :-1, :].contiguous()
         shift_labels = input_ids[:, 1:].contiguous()
-        
+
+        # Compute log-probs for all tokens
         log_probs_full = F.log_softmax(shift_logits, dim=-1)
         token_log_probs = log_probs_full.gather(dim=-1, index=shift_labels.unsqueeze(-1)).squeeze(-1)
-        
+
+        # Only keep log-probs for the target answer tokens
+        # The target answer starts after the prompt, so slice accordingly
         target_token_log_probs = token_log_probs[:, (prompt_ids.shape[1] - 1):]
-        
-        return target_token_log_probs.sum().item()
+
+        # Sum log-probs to get total log-probability of the target answer
+        total_log_prob = target_token_log_probs.sum().item()
+
+        # After computing target_token_log_probs
+        flat_logprobs = target_token_log_probs[0].tolist()
+        print("Per-token logprobs:", flat_logprobs)
+        print("Per-token probs:", [math.exp(lp) for lp in flat_logprobs])
+
+        return total_log_prob
 
 
 # Example usage for testing
@@ -274,38 +273,57 @@ if __name__ == "__main__":
     load_dotenv('/home/hrahmani/CausalContextAttributer/config.env')
     hf_auth_token  = os.environ.get("HF_API_KEY")
     class_labels = ["positive", "negative", "neutral"]
-    handler = LlamaHandler(class_labels, hf_auth_token, model_name)
-    
-    # Test for classify_one_word_with_logprob
-    text = "Oh, fantastic, another meeting that could've been an email."
-    true_label = "negative"
-    import time
-    start_time = time.time()
-    label, logprob = handler.classify_with_logprob(text)
-    end_time = time.time()
-    print(f"--- Classification Test ---")
-    print(f"Text: '{text}'")
-    print(f"Predicted Label: {label}, Log-Prob: {logprob:.4f}")
-    print(f"Time taken: {end_time - start_time:.2f} seconds\n")
+    llama_handler = LlamaHandler(class_labels, hf_auth_token, model_name)
+    llm_handler = LLM_Handler(class_labels, hf_auth_token, "meta-llama/Llama-3.2-1B")
+    test_text = "Oh, fantastic, another meeting that could've been an email."
+    test_label = "negative"
 
-    # Test for generate_one_sentence_with_logprob
-    question = "What is the capital of France?"
-    start_time = time.time()
-    answer, logprob = handler.generate_one_sentence_with_logprob(question)
-    end_time = time.time()
-    print(f"--- Sentence Generation Test ---")
-    print(f"Question: '{question}'")
-    print(f"Answer: '{answer}', Log-Prob: {logprob:.4f}")
-    print(f"Time taken: {end_time - start_time:.2f} seconds\n")
+    print("\n--- LlamaHandler.classify_with_logprob ---")
+    llama_result = llama_handler.classify_with_logprob(test_text)
+    print(f"Predicted label: {llama_result['chosen_label']}")
+    print(f"Unnormalized logprobs (logits): {llama_result['unnormalized_logprobs']}")
+    print(f"Normalized logprobs: {llama_result['normalized_logprobs']}")
+
     
-    # Test for compute_target_log_prob
-    question = "What is the capital of France?"
-    target_answer = "The capital of France is Paris."
-    start_time = time.time()
-    logprob = handler.compute_target_log_prob(question, target_answer)
-    end_time = time.time()
-    print(f"--- Target Probability Test ---")
-    print(f"Question: '{question}'")
-    print(f"Target Answer: '{target_answer}'")
-    print(f"Log-Prob of Target: {logprob:.4f}")
-    print(f"Time taken: {end_time - start_time:.2f} seconds")
+    generated_text, log_probs, gen_ids = llama_handler.generate_one_sentence_with_logprob(question="what is the capital of France?", context="The capital of france is paris.")
+    print(f'the generated text is {generated_text} with log probability {log_probs}')
+    print(f'the gen ids are {gen_ids}')
+    print(llama_handler.tokenizer.encode(generated_text, add_special_tokens=False))
+
+    # Remove EOS token if present in gen_ids
+    eos_token_id = llama_handler.tokenizer.eos_token_id
+    gen_ids_no_eos = gen_ids
+    if gen_ids[-1] == eos_token_id:
+        gen_ids_no_eos = gen_ids[:-1]
+
+    # # Get encoding of generated text
+    # encoded = llama_handler.tokenizer.encode(generated_text, add_special_tokens=False)
+
+    # print("gen_ids (no EOS):", gen_ids_no_eos)
+    # print("encoded:", encoded)
+    # print("Match:", list(gen_ids_no_eos) == encoded)
+
+    # Test compute_target_log_prob: should be near 1 for generated answer
+    log_prob_generated = llama_handler.compute_target_log_prob(
+        question="what is the capital of France?",
+        target_answer=generated_text,
+        context="The capital of France is Paris."
+    )
+    prob_generated = math.exp(log_prob_generated)
+    print(f"Log probability of generated answer: {log_prob_generated}")
+    print(f"Probability of generated answer: {prob_generated}")
+
+    # # Test compute_target_log_prob_generate: should be near 1 for generated answer
+    # log_prob_generated_step = llama_handler.compute_target_log_prob_generate(
+    #     question="what is the capital of France?",
+    #     target_answer=generated_text,
+    #     context="The capital of France is Paris."
+    # )
+    # prob_generated_step = math.exp(log_prob_generated_step)
+    # print(f"[Step-by-step] Log probability of generated answer: {log_prob_generated_step}")
+    # print(f"[Step-by-step] Probability of generated answer: {prob_generated_step}")
+
+    # print("\n--- LLM_Handler.get_classification_metrics ---")
+    # llm_result = llm_handler.get_classification_metrics(test_text, test_label)
+    # for k, v in llm_result.items():
+    #     print(f"{k}: {v}")
